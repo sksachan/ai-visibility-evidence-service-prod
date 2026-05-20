@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import unittest
 import importlib.util
@@ -78,6 +79,61 @@ class AiHygieneHelperTests(unittest.TestCase):
 
 class ReportStoreHygieneTests(unittest.TestCase):
     @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
+    def test_enrichment_helper_merges_full_inventory_without_fastapi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            import app.report_store as report_store
+
+            report_store.DATA_DIR = Path(tmp)
+            run_id = "direct_full_inventory"
+            run_dir = Path(tmp) / run_id
+            run_dir.mkdir(parents=True)
+            pages = [
+                {"url": f"https://www.nissan.co.jp/direct-{idx}.html", "current_geo_score_120": idx, "geo_analysis_ready": True}
+                for idx in range(4)
+            ]
+            (run_dir / "owned_pages_full.json").write_text(json.dumps({"pages": pages}), encoding="utf-8")
+            bundle = {
+                "schema_version": "query_workbench.v1",
+                "run_id": run_id,
+                "brand": "Nissan",
+                "market": "Japan",
+                "query_workbench": [{
+                    "query_id": "Q001",
+                    "query": "direct",
+                    "mapped_owned_urls": [{"url": "https://www.nissan.co.jp/direct-0.html"}],
+                }],
+            }
+
+            enriched = report_store.enrich_report_bundle(run_id, bundle)
+            self.assertEqual(len(enriched["owned_url_readiness"]), 4)
+            self.assertEqual(enriched["owned_pages_scoreable"], 4)
+            mapped = {row["url"]: row["query_mapped"] for row in enriched["owned_url_readiness"]}
+            self.assertTrue(mapped["https://www.nissan.co.jp/direct-0.html"])
+            self.assertFalse(mapped["https://www.nissan.co.jp/direct-3.html"])
+
+    @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
+    def test_enrichment_helper_preserves_source_citations_without_fastapi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            import app.report_store as report_store
+
+            report_store.DATA_DIR = Path(tmp)
+            run_id = "direct_citations"
+            run_dir = Path(tmp) / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "google_ai_mode_compact.json").write_text(json.dumps({
+                "rows": [{
+                    "query_id": "Q001",
+                    "query": "citation query",
+                    "top_citations": [{"url": "https://example.com/a", "source_domain": "example.com", "source_type": "publisher", "snippet": "Evidence text"}],
+                }]
+            }), encoding="utf-8")
+            enriched = report_store.enrich_report_bundle(run_id, {"schema_version": "query_workbench.v1", "query_workbench": [{"query": "citation query"}]})
+            citation = enriched["source_landscape"]["source_citations"][0]
+            self.assertEqual(citation["query_id"], "Q001")
+            self.assertEqual(citation["source_domain"], "example.com")
+            self.assertEqual(citation["snippet"], "Evidence text")
+
+    @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
     def test_store_and_latest_inject_hygiene(self):
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["DATA_DIR"] = tmp
@@ -92,7 +148,7 @@ class ReportStoreHygieneTests(unittest.TestCase):
             run_dir = Path(tmp) / run_id
             run_dir.mkdir(parents=True)
             (run_dir / "owned_pages_full.json").write_text(
-                '{"pages":[{"url":"https://www.nissan.co.jp/a","title":"A","json_ld_present":false,"json_ld_block_count":0,"schema_types_detected":[]}]}',
+                json.dumps({"pages": [{"url": "https://www.nissan.co.jp/a", "title": "A", "json_ld_present": False, "json_ld_block_count": 0, "schema_types_detected": []}]}),
                 encoding="utf-8",
             )
             bundle = {
@@ -154,6 +210,174 @@ class ReportStoreHygieneTests(unittest.TestCase):
             latest = client.get("/runs/latest/report-bundle", params={"brand": "Nissan", "market": "Japan"})
             self.assertEqual(latest.status_code, 200)
             self.assertEqual(latest.json()["ai_discoverability_hygiene"], existing)
+
+    @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
+    def test_report_bundle_enriches_full_owned_inventory_and_citations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["DATA_DIR"] = tmp
+            from fastapi.testclient import TestClient
+
+            import app.report_store as report_store
+            import app.main as main
+
+            report_store.DATA_DIR = Path(tmp)
+            main.DATA_DIR = Path(tmp)
+            run_id = "evidence_nissan_japan_full_inventory"
+            run_dir = Path(tmp) / run_id
+            run_dir.mkdir(parents=True)
+            pages = []
+            for idx in range(40):
+                url = f"https://www.nissan.co.jp/page-{idx}.html"
+                pages.append({
+                    "url": url,
+                    "title": f"Page {idx}",
+                    "current_geo_score_120": idx,
+                    "geo_dimensions": {"content_clarity": idx % 10, "structured_data": 0},
+                    "geo_analysis_ready": True,
+                    "inventory_source": "sitemap_inventory",
+                    "json_ld_present": idx == 0,
+                    "json_ld_block_count": 1 if idx == 0 else 0,
+                    "schema_types": ["Product"] if idx == 0 else [],
+                    "crawl_status": "success",
+                })
+            (run_dir / "owned_pages_full.json").write_text(
+                json.dumps({"pages": pages}),
+                encoding="utf-8",
+            )
+            (run_dir / "google_ai_mode_compact.json").write_text(
+                json.dumps({
+                    "rows": [{
+                        "query_id": "Q001",
+                        "query": "best ev japan",
+                        "top_citations": [{
+                            "url": "https://example.com/ev",
+                            "source_domain": "example.com",
+                            "source_type": "publisher_review",
+                            "title": "EV guide",
+                            "snippet": "Captured citation text",
+                            "rank": 1,
+                        }],
+                    }]
+                }),
+                encoding="utf-8",
+            )
+            bundle = {
+                "schema_version": "query_workbench.v1",
+                "run_id": run_id,
+                "brand": "Nissan",
+                "market": "Japan",
+                "executive": {"headline_metrics": {"owned_page_count": 1}},
+                "query_workbench": [{
+                    "query_id": "Q001",
+                    "query": "best ev japan",
+                    "current_ai_visibility": {"status": "external_led"},
+                    "mapped_owned_urls": [{"url": "https://www.nissan.co.jp/page-0.html", "current_geo_score_120": 10}],
+                }],
+                "page_level_cms_recommendations": [{"target_url": "https://www.nissan.co.jp/page-0.html"}],
+                "owned_url_readiness": [{"url": "https://www.nissan.co.jp/page-0.html", "current_geo_score_120": 10}],
+            }
+
+            client = TestClient(main.app)
+            response = client.post(f"/runs/{run_id}/report-bundle", json=bundle)
+            self.assertEqual(response.status_code, 200)
+            payload = client.get("/runs/latest/report-bundle", params={"brand": "Nissan", "market": "Japan"}).json()
+            rows = payload["owned_url_readiness"]
+            self.assertEqual(len(rows), 40)
+            mapped = {row["url"]: row["query_mapped"] for row in rows}
+            self.assertTrue(mapped["https://www.nissan.co.jp/page-0.html"])
+            self.assertFalse(mapped["https://www.nissan.co.jp/page-39.html"])
+            self.assertEqual(payload["executive"]["headline_metrics"]["owned_page_count"], 40)
+            self.assertEqual(payload["owned_pages_scoreable"], 40)
+            self.assertEqual(payload["source_landscape"]["source_citations"][0]["source_domain"], "example.com")
+            self.assertEqual(payload["source_landscape"]["source_citations"][0]["snippet"], "Captured citation text")
+
+            history = client.get("/reports/history", params={"brand": "Nissan", "market": "Japan"}).json()
+            self.assertEqual(history["runs"][0]["owned_pages_scoreable"], 40)
+            self.assertEqual(history["runs"][0]["owned_query_mapped_unique"], 1)
+
+    @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
+    def test_evidence_ready_is_not_latest_successful(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["DATA_DIR"] = tmp
+            from fastapi.testclient import TestClient
+
+            import app.report_store as report_store
+            import app.main as main
+
+            report_store.DATA_DIR = Path(tmp)
+            main.DATA_DIR = Path(tmp)
+            client = TestClient(main.app)
+
+            previous = {
+                "schema_version": "query_workbench.v1",
+                "run_id": "previous_completed",
+                "brand": "Nissan",
+                "market": "Japan",
+                "query_workbench": [{"query": "old"}],
+                "owned_url_readiness": [{"url": "https://www.nissan.co.jp/old.html", "current_geo_score_120": 20}],
+            }
+            self.assertEqual(client.post("/runs/previous_completed/report-bundle", json=previous).status_code, 200)
+
+            active_dir = Path(tmp) / "new_active"
+            active_dir.mkdir(parents=True)
+            report_store.write_json(active_dir / "report_manifest.json", {
+                "run_id": "new_active",
+                "brand": "Nissan",
+                "market": "Japan",
+                "status": "running",
+                "stage": "evidence_ready",
+                "dashboard_ready": False,
+                "created_at_epoch": 9999999999,
+            })
+            report_store.write_run_status("new_active", "running", {"brand": "Nissan", "market": "Japan", "stage": "evidence_ready"})
+
+            latest = client.get("/runs/latest/report-bundle", params={"brand": "Nissan", "market": "Japan"})
+            self.assertEqual(latest.status_code, 200)
+            self.assertEqual(latest.json()["run_id"], "previous_completed")
+            status = client.get("/runs/status", params={"brand": "Nissan", "market": "Japan"}).json()
+            self.assertEqual(status["latest_successful_run_id"], "previous_completed")
+            self.assertEqual(status["active_run"]["run_id"], "new_active")
+
+    @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
+    def test_hygiene_missing_pages_do_not_create_scored_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["DATA_DIR"] = tmp
+            from fastapi.testclient import TestClient
+
+            import app.report_store as report_store
+            import app.main as main
+
+            report_store.DATA_DIR = Path(tmp)
+            main.DATA_DIR = Path(tmp)
+            run_id = "hygiene_missing_only"
+            bundle = {
+                "schema_version": "query_workbench.v1",
+                "run_id": run_id,
+                "brand": "Nissan",
+                "market": "Japan",
+                "query_workbench": [{"query": "test"}],
+                "ai_discoverability_hygiene": {
+                    "priority": "high",
+                    "summary": "1/3 checked",
+                    "robots_txt": {"status": "available"},
+                    "llms_txt": {"status": "not found"},
+                    "structured_data": {
+                        "owned_pages_total": 3,
+                        "pages_with_json_ld": 1,
+                        "pages_with_schema": 1,
+                        "coverage_pct": 33.3,
+                        "pages_missing_json_ld": [
+                            {"url": "https://www.nissan.co.jp/missing-a.html"},
+                            {"url": "https://www.nissan.co.jp/missing-b.html"},
+                        ],
+                    },
+                },
+            }
+            client = TestClient(main.app)
+            self.assertEqual(client.post(f"/runs/{run_id}/report-bundle", json=bundle).status_code, 200)
+            payload = client.get("/runs/latest/report-bundle", params={"brand": "Nissan", "market": "Japan"}).json()
+            self.assertEqual(payload["owned_url_readiness"], [])
+            self.assertEqual(payload["owned_pages_scoreable"], 0)
 
 
 if __name__ == "__main__":

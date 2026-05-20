@@ -28,6 +28,7 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 SUCCESS_STATES = {"success", "successful", "completed", "succeeded", "ready"}
 IN_PROGRESS_STATES = {"queued", "accepted", "pending", "running", "in_progress", "processing"}
 FAILED_STATES = {"failed", "error", "cancelled", "canceled"}
+REPORT_READY_STAGES = {"report_bundle_ready"}
 
 
 def now_epoch() -> int:
@@ -108,6 +109,229 @@ def extract_bundle_metadata(bundle: dict[str, Any], fallback_run_id: str | None 
         "contract_version": bundle.get("contract_version"),
     }
 
+
+def first_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def url_key(value: Any) -> str:
+    return str(value or "").strip().split("#", 1)[0].rstrip("/").lower()
+
+
+def page_url(page: dict[str, Any]) -> str:
+    return str(first_value(page.get("url"), page.get("page_url"), page.get("target_url"), page.get("canonical_url"), page.get("final_url"), "") or "")
+
+
+def source_domain(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+
+def score_value(page: dict[str, Any]) -> Any:
+    return first_value(page.get("current_geo_score_120"), page.get("score_120"), page.get("geo_readiness_score"), page.get("geo_score_120"))
+
+
+def has_scored_signal(page: dict[str, Any]) -> bool:
+    return score_value(page) is not None or page.get("geo_analysis_ready") is True
+
+
+def geo_dimensions(page: dict[str, Any]) -> dict[str, Any]:
+    value = first_value(page.get("geo_dimensions"), page.get("dimensions"), page.get("dimension_scores"))
+    return value if isinstance(value, dict) else {}
+
+
+def technical_signals(page: dict[str, Any]) -> dict[str, Any]:
+    tech = page.get("technical_signals") if isinstance(page.get("technical_signals"), dict) else {}
+    schema_types = first_value(tech.get("schema_types"), tech.get("schemaTypes"), page.get("schema_types"), page.get("schema_types_detected"), [])
+    block_count = first_value(tech.get("json_ld_block_count"), tech.get("jsonLdBlockCount"), page.get("json_ld_block_count"))
+    json_ld_present = first_value(tech.get("json_ld_present"), tech.get("jsonLdPresent"), page.get("json_ld_present"))
+    out = {
+        **tech,
+        "json_ld_present": json_ld_present,
+        "json_ld_block_count": block_count,
+        "schema_types": schema_types if isinstance(schema_types, list) else [],
+        "crawl_status": first_value(tech.get("crawl_status"), tech.get("crawlStatus"), page.get("crawl_status")),
+        "canonical_url": first_value(tech.get("canonical_url"), tech.get("canonicalUrl"), page.get("canonical_url"), page.get("final_url")),
+        "word_count": first_value(tech.get("word_count"), tech.get("wordCount"), page.get("word_count")),
+    }
+    return {k: v for k, v in out.items() if v is not None and v != ""}
+
+
+def related_queries_from(value: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in as_list(value):
+        if not isinstance(row, dict):
+            continue
+        related = {
+            "query_id": first_value(row.get("query_id"), row.get("id")),
+            "query": first_value(row.get("query"), row.get("text")),
+            "visibility_status": first_value(row.get("visibility_status"), row.get("status")),
+        }
+        if related.get("query_id") or related.get("query"):
+            out.append(related)
+    return out
+
+
+def canonical_owned_row(page: dict[str, Any], *, query_mapped: bool = False, related_queries: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    url = page_url(page)
+    if not url:
+        return None
+    extract = page.get("owned_page_extract") if isinstance(page.get("owned_page_extract"), dict) else {}
+    tech = technical_signals(page)
+    score = score_value(page)
+    row = {
+        "url": url,
+        "title": first_value(extract.get("title"), page.get("title"), page.get("page_title"), ""),
+        "current_geo_score_120": score if score is not None else 0,
+        "geo_dimensions": geo_dimensions(page),
+        "query_mapped": bool(page.get("query_mapped") is True or page.get("queryMapped") is True or query_mapped),
+        "inventory_source": first_value(page.get("inventory_source"), page.get("inventorySource"), "query_mapped" if query_mapped else "sitemap_inventory"),
+        "related_queries": related_queries if related_queries is not None else related_queries_from(first_value(page.get("related_queries"), page.get("related_query_evidence"), page.get("mapped_queries"))),
+        "technical_signals": tech,
+        "json_ld_present": tech.get("json_ld_present"),
+        "json_ld_block_count": tech.get("json_ld_block_count"),
+        "schema_types": tech.get("schema_types", []),
+    }
+    for key in ("score_band", "crawl_status", "extraction_status", "geo_analysis_ready"):
+        if page.get(key) is not None:
+            row[key] = page.get(key)
+    return {k: v for k, v in row.items() if v is not None}
+
+
+def bundle_query_mapping(bundle: dict[str, Any]) -> tuple[set[str], dict[str, list[dict[str, Any]]]]:
+    mapped: set[str] = set()
+    related_by_url: dict[str, list[dict[str, Any]]] = {}
+    for row in as_list(bundle.get("query_workbench")):
+        if not isinstance(row, dict):
+            continue
+        related = {
+            "query_id": first_value(row.get("query_id"), row.get("id")),
+            "query": row.get("query"),
+            "visibility_status": (row.get("current_ai_visibility") or {}).get("status") if isinstance(row.get("current_ai_visibility"), dict) else None,
+        }
+        for page in as_list(row.get("mapped_owned_urls")):
+            if not isinstance(page, dict):
+                continue
+            key = url_key(page_url(page))
+            if not key:
+                continue
+            mapped.add(key)
+            if related.get("query_id") or related.get("query"):
+                related_by_url.setdefault(key, []).append(related)
+    for rec_key in ("page_level_cms_recommendations", "cms_recommendations"):
+        for rec in as_list(bundle.get(rec_key)):
+            if not isinstance(rec, dict):
+                continue
+            key = url_key(first_value(rec.get("target_url"), rec.get("targetUrl"), rec.get("url")))
+            if key:
+                mapped.add(key)
+    return mapped, related_by_url
+
+
+def owned_rows_from_run_artifacts(run_id: str) -> list[dict[str, Any]]:
+    rdir = run_dir(run_id)
+    rows: list[dict[str, Any]] = []
+    for path in [
+        rdir / "owned_pages_full.json",
+        rdir / "bodhi_bundle.json",
+        rdir / "compact_bundle.json",
+        rdir / "evidence_scope.json",
+        rdir / "audit_context.json",
+    ]:
+        payload = read_json(path, {}) or {}
+        if not isinstance(payload, dict):
+            continue
+        sources: list[Any] = []
+        if path.name == "bodhi_bundle.json":
+            owned = payload.get("owned_pages_full") if isinstance(payload.get("owned_pages_full"), dict) else {}
+            sources.extend(as_list(owned.get("pages")))
+        elif path.name == "compact_bundle.json":
+            files = payload.get("files") if isinstance(payload.get("files"), dict) else {}
+            owned = files.get("owned_pages_full") if isinstance(files.get("owned_pages_full"), dict) else payload.get("owned_pages_full")
+            if isinstance(owned, dict):
+                sources.extend(as_list(owned.get("pages")))
+        else:
+            sources.extend(as_list(payload.get("pages")))
+            sources.extend(as_list(payload.get("owned_pages")))
+            sources.extend(as_list(payload.get("owned_urls")))
+        rows.extend([page for page in sources if isinstance(page, dict) and has_scored_signal(page)])
+    return rows
+
+
+def source_citations_from_run_artifacts(run_id: str) -> list[dict[str, Any]]:
+    rdir = run_dir(run_id)
+    citations: list[dict[str, Any]] = []
+    google = read_json(rdir / "google_ai_mode_compact.json", {}) or {}
+    if isinstance(google, dict):
+        for row in as_list(first_value(google.get("rows"), google.get("queries"))):
+            if not isinstance(row, dict):
+                continue
+            for index, ref in enumerate(as_list(first_value(row.get("top_citations"), row.get("top_cited_sources"), row.get("references"))), start=1):
+                if isinstance(ref, str):
+                    ref = {"url": ref}
+                if not isinstance(ref, dict):
+                    continue
+                url = str(first_value(ref.get("url"), ref.get("source_url"), ref.get("link"), "") or "")
+                if not url:
+                    continue
+                citations.append({
+                    "query_id": row.get("query_id"),
+                    "query": row.get("query"),
+                    "url": url,
+                    "source_url": url,
+                    "domain": first_value(ref.get("domain"), ref.get("source_domain"), source_domain(url)),
+                    "source_domain": first_value(ref.get("source_domain"), ref.get("domain"), source_domain(url)),
+                    "source_type": first_value(ref.get("source_type"), ref.get("sourceType"), "external_citation"),
+                    "title": first_value(ref.get("title"), ref.get("source_name"), source_domain(url)),
+                    "snippet": first_value(ref.get("snippet"), ref.get("citation_text"), ref.get("text"), ""),
+                    "citation_text": first_value(ref.get("citation_text"), ref.get("snippet"), ref.get("text"), ""),
+                    "rank": first_value(ref.get("rank"), ref.get("citation_position"), index),
+                    "citation_position": first_value(ref.get("citation_position"), ref.get("rank"), index),
+                })
+    evidence = read_json(rdir / "evidence_scope.json", {}) or {}
+    if isinstance(evidence, dict):
+        for ref in as_list(evidence.get("ai_citations")):
+            if not isinstance(ref, dict):
+                continue
+            url = str(first_value(ref.get("url"), ref.get("source_url"), ref.get("link"), "") or "")
+            if not url:
+                continue
+            citations.append({
+                "query_id": ref.get("query_id"),
+                "query": ref.get("query"),
+                "url": url,
+                "source_url": url,
+                "domain": first_value(ref.get("domain"), ref.get("source_domain"), source_domain(url)),
+                "source_domain": first_value(ref.get("source_domain"), ref.get("domain"), source_domain(url)),
+                "source_type": first_value(ref.get("source_type"), ref.get("sourceType"), "external_citation"),
+                "title": first_value(ref.get("title"), ref.get("source_name"), source_domain(url)),
+                "snippet": first_value(ref.get("snippet"), ref.get("citation_text"), ref.get("text"), ""),
+                "citation_text": first_value(ref.get("citation_text"), ref.get("snippet"), ref.get("text"), ""),
+                "rank": first_value(ref.get("rank"), ref.get("citation_position")),
+                "citation_position": first_value(ref.get("citation_position"), ref.get("rank")),
+            })
+    deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for citation in citations:
+        key = (str(citation.get("query_id") or ""), url_key(citation.get("url")), str(citation.get("citation_position") or ""))
+        deduped.setdefault(key, citation)
+    return list(deduped.values())
+
+
+def is_report_ready_manifest(manifest: dict[str, Any]) -> bool:
+    stage = str(manifest.get("stage") or "").lower()
+    status = str(manifest.get("status") or "").lower()
+    return bool(manifest.get("dashboard_ready", True)) and stage in REPORT_READY_STAGES and status in SUCCESS_STATES
 
 
 
@@ -218,7 +442,7 @@ def report_bundle_path(run_id: str) -> Path:
 def load_report_bundle(run_id: str) -> dict[str, Any] | None:
     bundle = read_json(report_bundle_path(run_id))
     if isinstance(bundle, dict):
-        return ensure_ai_hygiene(run_id, bundle, persist=True)
+        return enrich_report_bundle(run_id, bundle, persist=True)
     return bundle
 
 
@@ -236,14 +460,62 @@ def ensure_ai_hygiene(run_id: str, bundle: dict[str, Any], *, persist: bool = Fa
     return enriched
 
 
+def enrich_report_bundle(run_id: str, bundle: dict[str, Any], *, persist: bool = False) -> dict[str, Any]:
+    enriched = ensure_ai_hygiene(run_id, dict(bundle), persist=False)
+    mapped_keys, related_by_url = bundle_query_mapping(enriched)
+    rows_by_url: dict[str, dict[str, Any]] = {}
+
+    for row in as_list(first_value(enriched.get("owned_url_readiness"), enriched.get("owned_readiness"), enriched.get("owned_pages"))):
+        if not isinstance(row, dict):
+            continue
+        key = url_key(page_url(row))
+        if not key:
+            continue
+        canonical = canonical_owned_row(
+            row,
+            query_mapped=key in mapped_keys,
+            related_queries=related_by_url.get(key) or related_queries_from(first_value(row.get("related_queries"), row.get("related_query_evidence"))),
+        )
+        if canonical:
+            rows_by_url[key] = canonical
+
+    for page in owned_rows_from_run_artifacts(run_id):
+        key = url_key(page_url(page))
+        if not key or key in rows_by_url:
+            continue
+        canonical = canonical_owned_row(page, query_mapped=key in mapped_keys, related_queries=related_by_url.get(key, []))
+        if canonical:
+            rows_by_url[key] = canonical
+
+    owned_rows = list(rows_by_url.values())
+    enriched["owned_url_readiness"] = owned_rows
+    enriched["owned_pages_scoreable"] = len(owned_rows)
+    enriched["owned_query_mapped_unique"] = sum(1 for row in owned_rows if row.get("query_mapped") is True)
+
+    executive = enriched.get("executive")
+    if isinstance(executive, dict):
+        headline = executive.setdefault("headline_metrics", {})
+        if isinstance(headline, dict) and owned_rows:
+            headline["owned_page_count"] = len(owned_rows)
+
+    citations = source_citations_from_run_artifacts(run_id)
+    if citations:
+        landscape = enriched.setdefault("source_landscape", {})
+        if isinstance(landscape, dict) and not isinstance(landscape.get("source_citations"), list):
+            landscape["source_citations"] = citations
+
+    if persist:
+        write_json(report_bundle_path(run_id), enriched)
+    return enriched
+
+
 def scan_latest_successful(brand: str | None, market: str | None, domain: str | None = None) -> dict[str, Any] | None:
     candidates: list[dict[str, Any]] = []
     for child in DATA_DIR.iterdir() if DATA_DIR.exists() else []:
         if not child.is_dir() or child.name.startswith("_") or child.name in {"latest", "latest_successful", "run_status", "portfolios"}:
             continue
         manifest = read_json(child / "report_manifest.json") or read_json(child / "run_manifest.json") or {}
-        status = (manifest.get("status") or "").lower()
-        if status not in SUCCESS_STATES:
+        if not is_report_ready_manifest(manifest):
             continue
         if brand and normalise_key(manifest.get("brand")) != normalise_key(brand):
             continue
@@ -275,6 +547,7 @@ def _report_history_row(manifest: dict[str, Any], status: dict[str, Any] | None 
     executive = bundle.get("executive") if isinstance(bundle, dict) and isinstance(bundle.get("executive"), dict) else {}
     headline = executive.get("headline_metrics") if isinstance(executive.get("headline_metrics"), dict) else {}
     hygiene = None
+    owned_rows = bundle.get("owned_url_readiness") if isinstance(bundle, dict) and isinstance(bundle.get("owned_url_readiness"), list) else []
     if isinstance(bundle, dict):
         hygiene = bundle.get("ai_discoverability_hygiene") or executive.get("ai_discoverability_hygiene")
     return {
@@ -288,7 +561,9 @@ def _report_history_row(manifest: dict[str, Any], status: dict[str, Any] | None 
         "created_at_epoch": manifest.get("created_at_epoch") or status.get("created_at_epoch") or status.get("started_at_epoch"),
         "completed_at_epoch": manifest.get("completed_at_epoch") or status.get("completed_at_epoch"),
         "query_count": status.get("query_count") or headline.get("query_count"),
-        "owned_pages_scoreable": status.get("owned_pages_scoreable") or headline.get("owned_page_count"),
+        "owned_pages_scoreable": len(owned_rows) or status.get("owned_pages_scoreable") or headline.get("owned_page_count"),
+        "owned_inventory_selected": status.get("owned_inventory_selected") or status.get("owned_url_count"),
+        "owned_query_mapped_unique": status.get("owned_query_mapped_unique") or sum(1 for row in owned_rows if isinstance(row, dict) and row.get("query_mapped") is True),
         "external_pages_scoreable": status.get("external_pages_scoreable"),
         "citation_count": status.get("external_citation_count") or status.get("serpapi_citation_count"),
         "serpapi_enabled": bool((status.get("request") or {}).get("run_serpapi") or (status.get("request") or {}).get("enable_serpapi")),
@@ -312,7 +587,7 @@ def _scan_report_history(brand: str | None, market: str | None, domain: str | No
         manifest = read_json(child / "report_manifest.json") or read_json(child / "run_manifest.json") or {}
         if not manifest:
             continue
-        if str(manifest.get("status") or "").lower() not in SUCCESS_STATES:
+        if not is_report_ready_manifest(manifest):
             continue
         if not bool(manifest.get("dashboard_ready", True)):
             continue
@@ -409,7 +684,7 @@ async def store_report_bundle(run_id: str, request: Request, x_admin_token: str 
     bundle = await request.json()
     if not isinstance(bundle, dict):
         raise HTTPException(status_code=400, detail="Report bundle must be a JSON object")
-    bundle = ensure_ai_hygiene(run_id, bundle)
+    bundle = enrich_report_bundle(run_id, bundle)
 
     is_dashboard_ready = has_recognised_report_payload(bundle)
 
@@ -431,6 +706,8 @@ async def store_report_bundle(run_id: str, request: Request, x_admin_token: str 
         "report_bundle": str(report_bundle_path(run_id)),
         "created_at_epoch": now_epoch(),
         "completed_at_epoch": now_epoch(),
+        "owned_pages_scoreable": len(bundle.get("owned_url_readiness") or []),
+        "owned_query_mapped_unique": sum(1 for row in (bundle.get("owned_url_readiness") or []) if isinstance(row, dict) and row.get("query_mapped") is True),
     }
     manifest["dashboard_ready"] = is_dashboard_ready
     if not is_dashboard_ready:
@@ -462,8 +739,9 @@ def get_latest_report_bundle(brand: str = Query(...), market: str = Query(...), 
     manifest = None
     for key in key_candidates:
         manifest = read_json(latest_index_dir() / f"{key}.json")
-        if manifest:
+        if manifest and is_report_ready_manifest(manifest):
             break
+        manifest = None
     if not manifest:
         manifest = scan_latest_successful(brand, market, domain)
     if not manifest:
@@ -535,7 +813,7 @@ def get_run_statuses(brand: str | None = None, market: str | None = None, domain
             rows.append(status)
     rows.sort(key=lambda x: x.get("updated_at_epoch") or x.get("created_at_epoch") or 0, reverse=True)
     latest_successful = scan_latest_successful(brand, market, domain)
-    latest_active = next((r for r in rows if str(r.get("status", "")).lower() in IN_PROGRESS_STATES), None)
+    latest_active = next((r for r in rows if str(r.get("status", "")).lower() in IN_PROGRESS_STATES or str(r.get("stage", "")).lower() == "evidence_ready"), None)
     return {
         "status": "ok",
         "latest_successful_run_id": (latest_successful or {}).get("run_id"),

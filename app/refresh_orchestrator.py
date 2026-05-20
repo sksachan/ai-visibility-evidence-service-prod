@@ -1127,11 +1127,11 @@ def run_phase2_refresh(job_id: str, req: dict[str, Any]) -> None:
                 write_run_status(target_run_id, "running", {"stage": "auditor_running", "query_portfolio_id": portfolio_id, "auditor": auditor})
                 update_job(job_id, {"status": "running", "stage": "auditor_running", "target_run_id": target_run_id, "updated_at_epoch": now_epoch()})
             else:
-                write_run_status(target_run_id, "completed", {"stage": "evidence_ready", "query_portfolio_id": portfolio_id, "completed_at_epoch": now_epoch()})
-                update_job(job_id, {"status": "completed", "stage": "evidence_ready", "target_run_id": target_run_id, "completed_at_epoch": now_epoch()})
+                write_run_status(target_run_id, "running", {"stage": "evidence_ready", "query_portfolio_id": portfolio_id, "awaiting_report_bundle": True})
+                update_job(job_id, {"status": "running", "stage": "evidence_ready", "target_run_id": target_run_id, "updated_at_epoch": now_epoch()})
         else:
-            write_run_status(target_run_id, "completed", {"stage": "evidence_ready", "query_portfolio_id": portfolio_id, "completed_at_epoch": now_epoch()})
-            update_job(job_id, {"status": "completed", "stage": "evidence_ready", "target_run_id": target_run_id, "completed_at_epoch": now_epoch()})
+            write_run_status(target_run_id, "running", {"stage": "evidence_ready", "query_portfolio_id": portfolio_id, "awaiting_report_bundle": True})
+            update_job(job_id, {"status": "running", "stage": "evidence_ready", "target_run_id": target_run_id, "updated_at_epoch": now_epoch()})
     except Exception as e:
         write_run_status(target_run_id, "failed", {"stage": "failed", "error": str(e)[:1500], "failed_at_epoch": now_epoch()})
         update_job(job_id, {"status": "failed", "stage": "failed", "error": str(e)[:1500], "failed_at_epoch": now_epoch()})
