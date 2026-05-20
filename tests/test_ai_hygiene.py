@@ -88,7 +88,17 @@ class ReportStoreHygieneTests(unittest.TestCase):
             run_dir = Path(tmp) / run_id
             run_dir.mkdir(parents=True)
             pages = [
-                {"url": f"https://www.nissan.co.jp/direct-{idx}.html", "current_geo_score_120": idx, "geo_analysis_ready": True}
+                {
+                    "url": f"https://www.nissan.co.jp/direct-{idx}.html",
+                    "title": f"Direct page {idx}",
+                    "crawl_status": "success",
+                    "word_count": 900,
+                    "markdown": "## Charging support\nOfficial specifications, warranty conditions, safety guidance and 2026 update. Range 300 km. Charging 40 kW.",
+                    "headings": ["Charging support", "Specifications"],
+                    "canonical_url": f"https://www.nissan.co.jp/direct-{idx}.html",
+                    "json_ld_present": idx == 0,
+                    "json_ld_block_count": 1 if idx == 0 else 0,
+                }
                 for idx in range(4)
             ]
             (run_dir / "owned_pages_full.json").write_text(json.dumps({"pages": pages}), encoding="utf-8")
@@ -110,6 +120,9 @@ class ReportStoreHygieneTests(unittest.TestCase):
             mapped = {row["url"]: row["query_mapped"] for row in enriched["owned_url_readiness"]}
             self.assertTrue(mapped["https://www.nissan.co.jp/direct-0.html"])
             self.assertFalse(mapped["https://www.nissan.co.jp/direct-3.html"])
+            scores = {row["url"]: row["current_geo_score_120"] for row in enriched["owned_url_readiness"]}
+            self.assertGreater(scores["https://www.nissan.co.jp/direct-3.html"], 0)
+            self.assertGreater(enriched["owned_url_readiness"][3]["geo_dimensions"]["semantic_depth"], 0)
 
     @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
     def test_enrichment_helper_preserves_source_citations_without_fastapi(self):
