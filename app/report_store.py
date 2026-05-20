@@ -442,7 +442,10 @@ def report_bundle_path(run_id: str) -> Path:
 def load_report_bundle(run_id: str) -> dict[str, Any] | None:
     bundle = read_json(report_bundle_path(run_id))
     if isinstance(bundle, dict):
-        return enrich_report_bundle(run_id, bundle, persist=True)
+        # Read paths must not rewrite the full frontend bundle. Persisting during
+        # GET /runs/latest, /reports/history or /runs/status repeatedly reloads
+        # large crawl artifacts and can amplify memory usage under polling.
+        return enrich_report_bundle(run_id, bundle, persist=False)
     return bundle
 
 
@@ -525,8 +528,6 @@ def scan_latest_successful(brand: str | None, market: str | None, domain: str | 
             continue
         if not report_bundle_path(child.name).exists():
             continue
-        if not load_valid_report_bundle(child.name):
-            continue
         candidates.append(manifest)
     candidates.sort(key=lambda x: x.get("completed_at_epoch") or x.get("created_at_epoch") or 0, reverse=True)
     return candidates[0] if candidates else None
@@ -543,13 +544,20 @@ def _epoch_from_any(value: Any) -> int:
 def _report_history_row(manifest: dict[str, Any], status: dict[str, Any] | None = None) -> dict[str, Any]:
     status = status or {}
     run_id = str(manifest.get("run_id") or status.get("run_id") or "")
-    bundle = load_report_bundle(run_id) if run_id else None
-    executive = bundle.get("executive") if isinstance(bundle, dict) and isinstance(bundle.get("executive"), dict) else {}
-    headline = executive.get("headline_metrics") if isinstance(executive.get("headline_metrics"), dict) else {}
-    hygiene = None
-    owned_rows = bundle.get("owned_url_readiness") if isinstance(bundle, dict) and isinstance(bundle.get("owned_url_readiness"), list) else []
-    if isinstance(bundle, dict):
-        hygiene = bundle.get("ai_discoverability_hygiene") or executive.get("ai_discoverability_hygiene")
+    # Keep history lightweight. Loading every full frontend bundle just to render
+    # the Previous Runs table can retain large JSON objects and crawl snippets in
+    # memory while the frontend polls refresh status.
+    query_count = status.get("query_count") or manifest.get("query_count")
+    owned_pages_scoreable = (
+        status.get("owned_pages_scoreable")
+        or manifest.get("owned_pages_scoreable")
+        or manifest.get("owned_url_readiness_count")
+    )
+    owned_query_mapped_unique = (
+        status.get("owned_query_mapped_unique")
+        or manifest.get("owned_query_mapped_unique")
+    )
+    hygiene = manifest.get("ai_hygiene") or status.get("ai_hygiene")
     return {
         "run_id": run_id,
         "brand": manifest.get("brand") or status.get("brand"),
@@ -560,10 +568,10 @@ def _report_history_row(manifest: dict[str, Any], status: dict[str, Any] | None 
         "dashboard_ready": bool(manifest.get("dashboard_ready", True)),
         "created_at_epoch": manifest.get("created_at_epoch") or status.get("created_at_epoch") or status.get("started_at_epoch"),
         "completed_at_epoch": manifest.get("completed_at_epoch") or status.get("completed_at_epoch"),
-        "query_count": status.get("query_count") or headline.get("query_count"),
-        "owned_pages_scoreable": len(owned_rows) or status.get("owned_pages_scoreable") or headline.get("owned_page_count"),
+        "query_count": query_count,
+        "owned_pages_scoreable": owned_pages_scoreable,
         "owned_inventory_selected": status.get("owned_inventory_selected") or status.get("owned_url_count"),
-        "owned_query_mapped_unique": status.get("owned_query_mapped_unique") or sum(1 for row in owned_rows if isinstance(row, dict) and row.get("query_mapped") is True),
+        "owned_query_mapped_unique": owned_query_mapped_unique,
         "external_pages_scoreable": status.get("external_pages_scoreable"),
         "citation_count": status.get("external_citation_count") or status.get("serpapi_citation_count"),
         "serpapi_enabled": bool((status.get("request") or {}).get("run_serpapi") or (status.get("request") or {}).get("enable_serpapi")),
@@ -597,7 +605,7 @@ def _scan_report_history(brand: str | None, market: str | None, domain: str | No
             continue
         if domain and manifest.get("domain") and normalise_key(manifest.get("domain")) != normalise_key(domain):
             continue
-        if not load_valid_report_bundle(child.name):
+        if not report_bundle_path(child.name).exists():
             continue
         status = load_run_status(child.name) or {}
         rows.append(_report_history_row(manifest, status))
@@ -706,8 +714,10 @@ async def store_report_bundle(run_id: str, request: Request, x_admin_token: str 
         "report_bundle": str(report_bundle_path(run_id)),
         "created_at_epoch": now_epoch(),
         "completed_at_epoch": now_epoch(),
+        "query_count": len(bundle.get("query_workbench") or bundle.get("queries") or []),
         "owned_pages_scoreable": len(bundle.get("owned_url_readiness") or []),
         "owned_query_mapped_unique": sum(1 for row in (bundle.get("owned_url_readiness") or []) if isinstance(row, dict) and row.get("query_mapped") is True),
+        "source_citation_count": len(((bundle.get("source_landscape") or {}).get("source_citations") or []) if isinstance(bundle.get("source_landscape"), dict) else []),
     }
     manifest["dashboard_ready"] = is_dashboard_ready
     if not is_dashboard_ready:
