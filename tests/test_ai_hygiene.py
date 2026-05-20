@@ -134,6 +134,61 @@ class ReportStoreHygieneTests(unittest.TestCase):
             self.assertEqual(citation["snippet"], "Evidence text")
 
     @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
+    def test_load_report_bundle_does_not_open_heavy_artifacts_on_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            import app.report_store as report_store
+
+            report_store.DATA_DIR = Path(tmp)
+            run_id = "read_path_no_artifact_repair"
+            run_dir = Path(tmp) / run_id
+            run_dir.mkdir(parents=True)
+            valid_hygiene = {
+                "priority": "low",
+                "summary": "checked",
+                "robots_txt": {"status": "available"},
+                "llms_txt": {"status": "not found"},
+                "structured_data": {
+                    "owned_pages_total": 1,
+                    "pages_with_schema": 1,
+                    "pages_with_json_ld": 1,
+                    "coverage_pct": 100,
+                },
+            }
+            report_store.write_json(
+                run_dir / "frontend_report_bundle.json",
+                {
+                    "schema_version": "query_workbench.v1",
+                    "run_id": run_id,
+                    "brand": "Nissan",
+                    "market": "Japan",
+                    "query_workbench": [{"query": "test"}],
+                    "owned_url_readiness": [{"url": "https://www.nissan.co.jp/a.html", "current_geo_score_120": 42}],
+                    "source_landscape": {"source_citations": [{"url": "https://example.com/a", "domain": "example.com"}]},
+                    "ai_discoverability_hygiene": valid_hygiene,
+                },
+            )
+
+            original_owned = report_store.owned_rows_from_run_artifacts
+            original_citations = report_store.source_citations_from_run_artifacts
+            try:
+                def fail_owned(_run_id):
+                    raise AssertionError("read path should not open owned artifacts")
+
+                def fail_citations(_run_id):
+                    raise AssertionError("read path should not open citation artifacts")
+
+                report_store.owned_rows_from_run_artifacts = fail_owned
+                report_store.source_citations_from_run_artifacts = fail_citations
+                loaded = report_store.load_report_bundle(run_id)
+            finally:
+                report_store.owned_rows_from_run_artifacts = original_owned
+                report_store.source_citations_from_run_artifacts = original_citations
+
+            self.assertEqual(len(loaded["owned_url_readiness"]), 1)
+            self.assertEqual(loaded["owned_pages_scoreable"], 1)
+            self.assertEqual(loaded["source_landscape"]["source_citations"][0]["domain"], "example.com")
+
+    @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
     def test_store_and_latest_inject_hygiene(self):
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["DATA_DIR"] = tmp

@@ -445,7 +445,10 @@ def load_report_bundle(run_id: str) -> dict[str, Any] | None:
         # Read paths must not rewrite the full frontend bundle. Persisting during
         # GET /runs/latest, /reports/history or /runs/status repeatedly reloads
         # large crawl artifacts and can amplify memory usage under polling.
-        return enrich_report_bundle(run_id, bundle, persist=False)
+        # Also avoid artifact repair on GET: store_report_bundle already persists
+        # the repaired canonical contract, while read-time artifact repair opens
+        # multiple large JSON files per request and grows process RSS under polling.
+        return enrich_report_bundle(run_id, bundle, persist=False, include_artifacts=False)
     return bundle
 
 
@@ -463,7 +466,7 @@ def ensure_ai_hygiene(run_id: str, bundle: dict[str, Any], *, persist: bool = Fa
     return enriched
 
 
-def enrich_report_bundle(run_id: str, bundle: dict[str, Any], *, persist: bool = False) -> dict[str, Any]:
+def enrich_report_bundle(run_id: str, bundle: dict[str, Any], *, persist: bool = False, include_artifacts: bool = True) -> dict[str, Any]:
     enriched = ensure_ai_hygiene(run_id, dict(bundle), persist=False)
     mapped_keys, related_by_url = bundle_query_mapping(enriched)
     rows_by_url: dict[str, dict[str, Any]] = {}
@@ -482,13 +485,14 @@ def enrich_report_bundle(run_id: str, bundle: dict[str, Any], *, persist: bool =
         if canonical:
             rows_by_url[key] = canonical
 
-    for page in owned_rows_from_run_artifacts(run_id):
-        key = url_key(page_url(page))
-        if not key or key in rows_by_url:
-            continue
-        canonical = canonical_owned_row(page, query_mapped=key in mapped_keys, related_queries=related_by_url.get(key, []))
-        if canonical:
-            rows_by_url[key] = canonical
+    if include_artifacts:
+        for page in owned_rows_from_run_artifacts(run_id):
+            key = url_key(page_url(page))
+            if not key or key in rows_by_url:
+                continue
+            canonical = canonical_owned_row(page, query_mapped=key in mapped_keys, related_queries=related_by_url.get(key, []))
+            if canonical:
+                rows_by_url[key] = canonical
 
     owned_rows = list(rows_by_url.values())
     enriched["owned_url_readiness"] = owned_rows
@@ -501,10 +505,10 @@ def enrich_report_bundle(run_id: str, bundle: dict[str, Any], *, persist: bool =
         if isinstance(headline, dict) and owned_rows:
             headline["owned_page_count"] = len(owned_rows)
 
-    citations = source_citations_from_run_artifacts(run_id)
-    if citations:
-        landscape = enriched.setdefault("source_landscape", {})
-        if isinstance(landscape, dict) and not isinstance(landscape.get("source_citations"), list):
+    landscape = enriched.setdefault("source_landscape", {})
+    if include_artifacts and isinstance(landscape, dict) and not isinstance(landscape.get("source_citations"), list):
+        citations = source_citations_from_run_artifacts(run_id)
+        if citations:
             landscape["source_citations"] = citations
 
     if persist:
