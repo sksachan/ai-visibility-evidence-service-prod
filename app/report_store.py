@@ -167,47 +167,66 @@ def geo_dimensions(page: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def fallback_geo_from_crawl(page: dict[str, Any]) -> tuple[int, dict[str, int]]:
-    """Conservative GEO fallback for crawled inventory pages without auditor scores.
+def page_geo_from_crawl(page: dict[str, Any]) -> tuple[int, dict[str, int], str, str]:
+    """Deterministic page-intrinsic GEO/readiness score from crawl evidence.
 
-    Inventory-only pages can be crawled after query mapping and therefore arrive
-    with technical signals/word counts but no query-specific GEO scoring. Use
-    crawl evidence only; do not invent query relevance. This avoids displaying
-    audited crawled pages as 0/120 simply because they were not CMS targets.
+    Query mapping is intentionally not used here. This score describes whether
+    the owned page itself is extractable, evidenced, current and machine-readable.
+    When the stored row has only thin metadata, return a labelled limited
+    fallback instead of pretending a full crawl-based page score was available.
     """
-    markdown = str(first_value(page.get("markdown"), page.get("text"), page.get("content_extract"), "") or "")
+    tech = page.get("technical_signals") if isinstance(page.get("technical_signals"), dict) else {}
+    markdown = str(first_value(page.get("markdown"), page.get("text"), page.get("content_extract"), tech.get("markdown"), tech.get("text"), "") or "")
     title = str(first_value(page.get("title"), page.get("page_title"), "") or "")
     description = str(first_value(page.get("meta_description"), page.get("description"), "") or "")
     combined = f"{title}\n{description}\n{markdown}"
     low = combined.lower()
     try:
-        word_count = int(page.get("word_count") or len(combined.split()))
+        word_count = int(first_value(page.get("word_count"), tech.get("word_count"), tech.get("wordCount"), len(combined.split())) or 0)
     except Exception:
         word_count = len(combined.split())
-    headings = page.get("headings") if isinstance(page.get("headings"), list) else []
-    schema_types = first_value(page.get("schema_types"), page.get("schema_types_detected"), [])
+    markdown_chars = len(markdown)
+    has_full_crawl_text = word_count >= 250 and markdown_chars >= 500
+    headings = page.get("headings") if isinstance(page.get("headings"), list) else tech.get("headings") if isinstance(tech.get("headings"), list) else []
+    schema_types = first_value(page.get("schema_types"), page.get("schema_types_detected"), tech.get("schema_types"), tech.get("schemaTypes"), [])
     schema_count = len(schema_types) if isinstance(schema_types, list) else 0
-    json_ld_present = bool(first_value(page.get("json_ld_present"), page.get("jsonLdPresent"), False))
+    json_ld_present = bool(first_value(page.get("json_ld_present"), page.get("jsonLdPresent"), tech.get("json_ld_present"), tech.get("jsonLdPresent"), False))
     json_ld_blocks = 0
     try:
-        json_ld_blocks = int(first_value(page.get("json_ld_block_count"), page.get("jsonLdBlockCount"), 0) or 0)
+        json_ld_blocks = int(first_value(page.get("json_ld_block_count"), page.get("jsonLdBlockCount"), tech.get("json_ld_block_count"), tech.get("jsonLdBlockCount"), 0) or 0)
     except Exception:
         json_ld_blocks = 0
     numeric_count = len(re.findall(r"\d+[\d,.]*\s?(?:km|kwh|kw|円|万円|年|%|％|mm|kg|人|席)", combined, re.I))
     question_count = low.count("?") + low.count("？") + low.count("faq") + low.count("よくある")
     proof_count = sum(low.count(term) for term in ["保証", "安全", "仕様", "諸元", "条件", "公式", "warranty", "safety", "specification", "official"])
     freshness = bool(re.search(r"20[2-3][0-9]|更新日|掲載日|last updated|valid until", combined, re.I))
+    canonical_url = first_value(page.get("canonical_url"), tech.get("canonical_url"), tech.get("canonicalUrl"), page.get("final_url"))
+    if not has_full_crawl_text:
+        dims = {
+            "content_clarity": 4 if title else 0,
+            "semantic_depth": 0,
+            "structured_data": min(20, (12 if json_ld_present or json_ld_blocks > 0 else 0) + min(8, schema_count * 3)),
+            "eeat_signals": 2,
+            "freshness_index": 4 if canonical_url else 0,
+            "faq_readiness": 0,
+        }
+        return sum(dims.values()), dims, "fallback_limited_v1", "Limited fallback: full markdown crawl text was not available, so only metadata and technical signals were scored."
     dims = {
         "content_clarity": min(20, (4 if title else 0) + (4 if description else 0) + (4 if word_count >= 300 else 0) + (4 if len(headings) >= 2 else 0)),
         "semantic_depth": min(20, (4 if word_count >= 600 else 0) + (4 if word_count >= 1200 else 0) + min(6, numeric_count) + min(4, len(headings))),
         "structured_data": min(20, (12 if json_ld_present or json_ld_blocks > 0 else 0) + min(8, schema_count * 3)),
         "eeat_signals": min(20, 2 + min(8, proof_count) + min(6, numeric_count) + (4 if freshness else 0)),
-        "freshness_index": min(20, 4 + (8 if freshness else 0) + (4 if page.get("canonical_url") else 0)),
+        "freshness_index": min(20, 4 + (8 if freshness else 0) + (4 if canonical_url else 0)),
         "faq_readiness": min(20, min(12, question_count * 3)),
     }
     if str(page.get("crawl_status") or "").lower() not in {"success", "partial_success_empty_text"} and word_count < 20:
         dims = {key: 0 for key in dims}
-    return sum(dims.values()), dims
+    return sum(dims.values()), dims, "crawl_evidence_v1", "Page-intrinsic GEO/readiness score computed from owned-page crawl text plus JSON-LD/schema, canonical and freshness signals."
+
+
+def fallback_geo_from_crawl(page: dict[str, Any]) -> tuple[int, dict[str, int]]:
+    score, dims, _method, _note = page_geo_from_crawl(page)
+    return score, dims
 
 
 def technical_signals(page: dict[str, Any]) -> dict[str, Any]:
@@ -250,13 +269,20 @@ def canonical_owned_row(page: dict[str, Any], *, query_mapped: bool = False, rel
     tech = technical_signals(page)
     score = score_value(page)
     dims = geo_dimensions(page)
+    scoring_method = first_value(page.get("scoring_method"), page.get("scoringMethod"))
+    scoring_notes = first_value(page.get("scoring_notes"), page.get("scoringNotes"))
     if score in (None, "", 0) and not dims:
-        score, dims = fallback_geo_from_crawl(page)
+        score, dims, scoring_method, scoring_notes = page_geo_from_crawl(page)
+    elif not scoring_method:
+        scoring_method = "explicit_page_geo_v1"
+        scoring_notes = "Explicit page-level GEO/readiness score supplied by the Auditor or stored report bundle."
     row = {
         "url": url,
         "title": first_value(extract.get("title"), page.get("title"), page.get("page_title"), ""),
         "current_geo_score_120": score if score is not None else 0,
         "geo_dimensions": dims,
+        "scoring_method": scoring_method,
+        "scoring_notes": scoring_notes,
         "query_mapped": bool(page.get("query_mapped") is True or page.get("queryMapped") is True or query_mapped),
         "inventory_source": first_value(page.get("inventory_source"), page.get("inventorySource"), "query_mapped" if query_mapped else "sitemap_inventory"),
         "related_queries": related_queries if related_queries is not None else related_queries_from(first_value(page.get("related_queries"), page.get("related_query_evidence"), page.get("mapped_queries"))),
@@ -562,7 +588,7 @@ def enrich_report_bundle(run_id: str, bundle: dict[str, Any], *, persist: bool =
                     existing["current_geo_score_120"] = canonical.get("current_geo_score_120")
                 if not existing.get("geo_dimensions") and canonical.get("geo_dimensions"):
                     existing["geo_dimensions"] = canonical.get("geo_dimensions")
-                for field in ("title", "inventory_source", "json_ld_present", "json_ld_block_count", "schema_types"):
+                for field in ("title", "inventory_source", "json_ld_present", "json_ld_block_count", "schema_types", "scoring_method", "scoring_notes"):
                     if existing.get(field) in (None, "", [], {}):
                         existing[field] = canonical.get(field)
                 tech = existing.get("technical_signals") if isinstance(existing.get("technical_signals"), dict) else {}

@@ -93,7 +93,8 @@ class ReportStoreHygieneTests(unittest.TestCase):
                     "title": f"Direct page {idx}",
                     "crawl_status": "success",
                     "word_count": 900,
-                    "markdown": "## Charging support\nOfficial specifications, warranty conditions, safety guidance and 2026 update. Range 300 km. Charging 40 kW.",
+                    "markdown": ("## Charging support\nOfficial specifications, warranty conditions, safety guidance and 2026 update. "
+                                 "Range 300 km. Charging 40 kW. ") * 12,
                     "headings": ["Charging support", "Specifications"],
                     "canonical_url": f"https://www.nissan.co.jp/direct-{idx}.html",
                     "json_ld_present": idx == 0,
@@ -123,6 +124,9 @@ class ReportStoreHygieneTests(unittest.TestCase):
             scores = {row["url"]: row["current_geo_score_120"] for row in enriched["owned_url_readiness"]}
             self.assertGreater(scores["https://www.nissan.co.jp/direct-3.html"], 0)
             self.assertGreater(enriched["owned_url_readiness"][3]["geo_dimensions"]["semantic_depth"], 0)
+            methods = {row["url"]: row["scoring_method"] for row in enriched["owned_url_readiness"]}
+            self.assertEqual(methods["https://www.nissan.co.jp/direct-0.html"], "crawl_evidence_v1")
+            self.assertEqual(methods["https://www.nissan.co.jp/direct-3.html"], "crawl_evidence_v1")
 
     @unittest.skipIf(importlib.util.find_spec("fastapi") is None, "FastAPI is not installed in this Python environment")
     def test_enrichment_helper_preserves_source_citations_without_fastapi(self):
