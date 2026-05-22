@@ -43,8 +43,8 @@ SERPAPI_ENGINE = os.environ.get("SERPAPI_ENGINE", "google_ai_mode")
 
 
 class FullRefreshRequest(BaseModel):
-    brand: str = "Nissan"
-    market: str = "Japan"
+    brand: str = ""
+    market: str = ""
     source_run_id: str | None = None
     target_run_id: str
     mode: str = "crawl_only"
@@ -56,6 +56,10 @@ class FullRefreshRequest(BaseModel):
     owned_urls: list[str] = Field(default_factory=list)
     external_urls: list[str] = Field(default_factory=list)
     brand_topic_categories: list[Any] = Field(default_factory=list)
+
+    # Multi-brand support: owned domains and brand terms passed from frontend
+    owned_domains: list[str] = Field(default_factory=list)
+    brand_terms: list[str] = Field(default_factory=list)
 
     crawl_owned: bool = True
     crawl_external: bool = True
@@ -69,8 +73,8 @@ class FullRefreshRequest(BaseModel):
 
 
 class SerpApiJobRequest(BaseModel):
-    brand: str = "Nissan"
-    market: str = "Japan"
+    brand: str = ""
+    market: str = ""
     target_run_id: str
     queries: list[dict[str, Any]]
     max_queries: int = 10
@@ -137,16 +141,47 @@ def dedupe(urls: list[str]) -> list[str]:
     return out
 
 
-def owned_domains_for_brand(brand: str, market: str) -> set[str]:
-    return {
-        "nissan.co.jp",
-        "www.nissan.co.jp",
-        "www2.nissan.co.jp",
-        "www3.nissan.co.jp",
-        "nissan-global.com",
-        "www.nissan-global.com",
-        "global.nissannews.com",
-    }
+# Default owned domains per brand for backward compatibility.
+# New deployments should pass owned_domains[] from the frontend refresh form.
+_DEFAULT_OWNED_DOMAINS: dict[str, set[str]] = {
+    "nissan": {
+        "nissan.co.jp", "www.nissan.co.jp", "www2.nissan.co.jp", "www3.nissan.co.jp",
+        "nissan-global.com", "www.nissan-global.com", "global.nissannews.com",
+    },
+}
+
+
+def owned_domains_for_brand(brand: str, market: str, explicit_domains: list[str] | None = None) -> set[str]:
+    """Return the set of owned domains for a brand.
+
+    If *explicit_domains* is provided (from the frontend refresh form), those
+    are used directly.  Otherwise fall back to the built-in defaults for known
+    brands, or infer from the primary domain URL.
+    """
+    if explicit_domains:
+        result: set[str] = set()
+        for d in explicit_domains:
+            d = d.strip().lower()
+            if not d:
+                continue
+            # Accept both bare domains and full URLs
+            if d.startswith(("http://", "https://")):
+                parsed = urlparse(d)
+                d = parsed.netloc.lower()
+            result.add(d)
+            # Also add www. variant if not present
+            if not d.startswith("www."):
+                result.add(f"www.{d}")
+        return result
+
+    # Backward compatibility: look up known brand defaults
+    key = brand.strip().lower()
+    if key in _DEFAULT_OWNED_DOMAINS:
+        return set(_DEFAULT_OWNED_DOMAINS[key])
+
+    # Generic fallback: no known defaults, return empty set
+    # Callers should handle empty set gracefully
+    return set()
 
 
 def is_owned_url(url: str, owned_domains: set[str]) -> bool:
@@ -191,7 +226,7 @@ def collect_urls_from_obj(obj: Any, owned_domains: set[str]) -> tuple[list[str],
 
 
 def extract_inventory(source_dir: Path, req: FullRefreshRequest) -> tuple[list[str], list[str]]:
-    owned_domains = owned_domains_for_brand(req.brand, req.market)
+    owned_domains = owned_domains_for_brand(req.brand, req.market, req.owned_domains or None)
 
     owned_urls = list(req.owned_urls or [])
     external_urls = list(req.external_urls or [])

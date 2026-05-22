@@ -46,10 +46,65 @@ class BodhiClient:
         except Exception:
             return {"raw_text": resp.text}
 
+    @staticmethod
+    def normalise_workflow_graph(run_metadata: Any, workflow_id: str | None = None) -> dict[str, Any] | None:
+        """Normalise workflow graph from run exec_metadata.
+
+        Bodhi expects ``run.exec_metadata.workflow[workflowId].nodes`` to be an
+        iterable array.  If the saved metadata stores nodes as an object keyed
+        by node-id, or if the workflow wrapper is missing, this helper rebuilds
+        the expected shape so the runner does not crash with
+        ``nodes is not iterable``.
+
+        Returns the normalised ``{nodes: [...], edges: [...]}`` dict, or *None*
+        if no usable graph could be recovered.
+        """
+        if not isinstance(run_metadata, dict):
+            return None
+
+        exec_meta = run_metadata.get("exec_metadata") or run_metadata
+        if not isinstance(exec_meta, dict):
+            return None
+
+        raw_workflow = exec_meta
+        if isinstance(exec_meta.get("workflow"), dict):
+            wf = exec_meta["workflow"]
+            if workflow_id and isinstance(wf.get(workflow_id), dict):
+                raw_workflow = wf[workflow_id]
+            elif "nodes" in wf:
+                raw_workflow = wf
+            else:
+                # Try first key as workflow-id wrapper
+                keys = list(wf.keys())
+                if len(keys) == 1 and isinstance(wf[keys[0]], dict):
+                    raw_workflow = wf[keys[0]]
+                else:
+                    raw_workflow = wf
+
+        raw_nodes = raw_workflow.get("nodes", [])
+        raw_edges = raw_workflow.get("edges", [])
+
+        nodes = (
+            raw_nodes if isinstance(raw_nodes, list)
+            else list(raw_nodes.values()) if isinstance(raw_nodes, dict)
+            else []
+        )
+        edges = (
+            raw_edges if isinstance(raw_edges, list)
+            else list(raw_edges.values()) if isinstance(raw_edges, dict)
+            else []
+        )
+
+        if not nodes:
+            return None
+
+        return {**raw_workflow, "nodes": nodes, "edges": edges}
+
     def trigger_task_run(self, task_id: str, workflow_id: str | None = None, run_name: str | None = None, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {"runName": run_name or "AI Visibility run"}
         overrides: dict[str, Any] = {}
-        if workflow_id:
+        allow_workflow_override = str(os.getenv("BODHI_ALLOW_WORKFLOW_OVERRIDE", "false")).lower() in {"true", "1", "yes", "y", "on"}
+        if workflow_id and allow_workflow_override:
             overrides["workflow"] = workflow_id
         # Inputs are not enough for Bodhi UI nodes; they still need HITL completion.
         # Keep them in payload for workflows that read overrides directly, then submit

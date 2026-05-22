@@ -1,23 +1,38 @@
-.venv/
-venv/
+# Python
 __pycache__/
-*/__pycache__/
-*.pyc
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-node_modules/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+*.egg-info/
 dist/
 build/
+
+# Environment
 .env
-.env.*
-!.env.example
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
-runs/
-data/
-tmp/
-outputs/
-storage/
-*.log
-playwright-report/
-test-results/
+Thumbs.db
+
+# Data (local development)
+/data/
+/tmp/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ruff
+.ruff_cache/

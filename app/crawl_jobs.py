@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 router = APIRouter()
@@ -25,8 +25,9 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 class CrawlRequest(BaseModel):
     source_run_id: str
     target_run_id: str
-    brand: str = "Nissan"
-    market: str = "Japan"
+    brand: str = ""
+    market: str = ""
+    owned_domains: list[str] = Field(default_factory=list)
     crawl_owned: bool = True
     crawl_external: bool = True
     max_owned_urls: int = 5
@@ -283,12 +284,9 @@ def run_crawl_job(job_id: str, req: CrawlRequest):
 
         copy_baseline_files(source_dir, target_dir)
 
-        owned_domains = {
-            "nissan.co.jp",
-            "www.nissan.co.jp",
-            "www2.nissan.co.jp",
-            "www3.nissan.co.jp",
-        }
+        # Use explicit owned_domains from request, or fall back to evidence_jobs helper
+        from app.evidence_jobs import owned_domains_for_brand
+        owned_domains = owned_domains_for_brand(req.brand, req.market, req.owned_domains or None)
 
         inventory_files = [
             source_dir / "audit_context.json",
