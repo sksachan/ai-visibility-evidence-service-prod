@@ -37,14 +37,39 @@ except Exception:
 router = APIRouter()
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data/evidence-runs"))
+
+
+def _market_to_gl(market: str) -> str:
+    """Map market name to SerpAPI 'gl' (geolocation) country code."""
+    _MAP = {
+        "japan": "jp", "usa": "us", "united states": "us", "us": "us",
+        "uk": "gb", "united kingdom": "gb", "germany": "de", "france": "fr",
+        "italy": "it", "spain": "es", "canada": "ca", "australia": "au",
+        "india": "in", "china": "cn", "south korea": "kr", "korea": "kr",
+        "brazil": "br", "mexico": "mx", "netherlands": "nl", "sweden": "se",
+        "norway": "no", "denmark": "dk", "finland": "fi", "switzerland": "ch",
+        "austria": "at", "belgium": "be", "portugal": "pt", "poland": "pl",
+        "thailand": "th", "indonesia": "id", "malaysia": "my", "singapore": "sg",
+        "philippines": "ph", "vietnam": "vn", "taiwan": "tw", "turkey": "tr",
+        "saudi arabia": "sa", "uae": "ae", "south africa": "za", "nigeria": "ng",
+        "egypt": "eg", "israel": "il", "new zealand": "nz", "ireland": "ie",
+        "czech republic": "cz", "romania": "ro", "hungary": "hu", "greece": "gr",
+        "argentina": "ar", "chile": "cl", "colombia": "co", "peru": "pe",
+        "global": "us",
+    }
+    key = (market or "").strip().lower()
+    # If the market value is already a 2-letter code, use it directly.
+    if len(key) == 2 and key.isalpha():
+        return key
+    return _MAP.get(key, "us")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 SERPAPI_ENGINE = os.environ.get("SERPAPI_ENGINE", "google_ai_mode")
 
 
 class FullRefreshRequest(BaseModel):
-    brand: str = "Nissan"
-    market: str = "Japan"
+    brand: str = ""
+    market: str = ""
     source_run_id: str | None = None
     target_run_id: str
     mode: str = "crawl_only"
@@ -56,6 +81,8 @@ class FullRefreshRequest(BaseModel):
     owned_urls: list[str] = Field(default_factory=list)
     external_urls: list[str] = Field(default_factory=list)
     brand_topic_categories: list[Any] = Field(default_factory=list)
+    owned_domains: list[str] = Field(default_factory=list)
+    brand_terms: list[str] = Field(default_factory=list)
 
     crawl_owned: bool = True
     crawl_external: bool = True
@@ -69,8 +96,8 @@ class FullRefreshRequest(BaseModel):
 
 
 class SerpApiJobRequest(BaseModel):
-    brand: str = "Nissan"
-    market: str = "Japan"
+    brand: str = ""
+    market: str = ""
     target_run_id: str
     queries: list[dict[str, Any]]
     max_queries: int = 10
@@ -137,16 +164,36 @@ def dedupe(urls: list[str]) -> list[str]:
     return out
 
 
-def owned_domains_for_brand(brand: str, market: str) -> set[str]:
-    return {
-        "nissan.co.jp",
-        "www.nissan.co.jp",
-        "www2.nissan.co.jp",
-        "www3.nissan.co.jp",
-        "nissan-global.com",
-        "www.nissan-global.com",
-        "global.nissannews.com",
-    }
+def owned_domains_for_brand(brand: str, market: str, explicit_domains: list[str] | None = None) -> set[str]:
+    """Return the set of owned domains for a brand/market.
+
+    If *explicit_domains* is supplied (from the refresh request payload), use
+    those directly.  Otherwise derive a reasonable set from the brand's primary
+    domain.  This keeps the function fully data-driven while remaining backward
+    compatible for callers that don't pass explicit_domains yet.
+    """
+    if explicit_domains:
+        result: set[str] = set()
+        for d in explicit_domains:
+            d = d.strip().lower()
+            if not d:
+                continue
+            # Strip protocol if user pasted a full URL
+            if d.startswith(("http://", "https://")):
+                d = urlparse(d).netloc.lower()
+            result.add(d)
+            # Auto-add common www variants
+            bare = d.removeprefix("www.")
+            result.add(bare)
+            result.add(f"www.{bare}")
+        return result
+
+    # Fallback: derive from brand name (generic heuristic)
+    brand_lower = brand.strip().lower().replace(" ", "")
+    if not brand_lower:
+        return set()
+    # Return empty set so callers know no explicit domains were configured
+    return set()
 
 
 def is_owned_url(url: str, owned_domains: set[str]) -> bool:
@@ -191,7 +238,7 @@ def collect_urls_from_obj(obj: Any, owned_domains: set[str]) -> tuple[list[str],
 
 
 def extract_inventory(source_dir: Path, req: FullRefreshRequest) -> tuple[list[str], list[str]]:
-    owned_domains = owned_domains_for_brand(req.brand, req.market)
+    owned_domains = owned_domains_for_brand(req.brand, req.market, getattr(req, 'owned_domains', None) or None)
 
     owned_urls = list(req.owned_urls or [])
     external_urls = list(req.external_urls or [])
@@ -686,7 +733,7 @@ def run_serpapi_collection(job_id: str, req: SerpApiJobRequest):
                 "q": query_text,
                 "api_key": SERPAPI_KEY,
                 "hl": "en",  # Executive dashboard output language; keep gl market-localised separately.
-                "gl": "jp" if req.market.lower() == "japan" else "us",
+                "gl": _market_to_gl(req.market),
             }
 
             resp = requests.get("https://serpapi.com/search.json", params=params, timeout=90)

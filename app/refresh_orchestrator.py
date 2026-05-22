@@ -192,11 +192,15 @@ def trigger_and_wait_for_portfolio(req: dict[str, Any], target_run_id: str) -> d
     client = BodhiClient()
     if not client.enabled:
         raise RuntimeError("BODHI_PAT_TOKEN is not set. Cannot trigger Bodhi portfolio task.")
+    if not workflow_id:
+        workflow_id = client.get_task_default_workflow_id(task_id) or ""
 
     inputs = {
         "brand": req.get("brand"),
         "market": req.get("market"),
         "domain": req.get("domain"),
+        "owned_domains": req.get("owned_domains") or req.get("ownedDomains") or req.get("domain") or "",
+        "brand_terms": req.get("brand_terms") or req.get("brandTerms") or req.get("brand") or "",
         "evidence_service_url": os.getenv("PUBLIC_EVIDENCE_SERVICE_URL") or req.get("evidence_service_url") or "",
         "portfolio_id": req.get("query_portfolio_id") or "",
         "seed_topics": req.get("seed_topics") or "",
@@ -205,7 +209,7 @@ def trigger_and_wait_for_portfolio(req: dict[str, Any], target_run_id: str) -> d
         "language": req.get("language") or "English",
         "portfolio_goal": req.get("portfolio_goal") or "AI answer visibility audit query portfolio.",
     }
-    write_run_status(target_run_id, "running", {"stage": "portfolio_generation_queued", "portfolio_task_id": task_id})
+    write_run_status(target_run_id, "running", {"stage": "portfolio_generation_queued", "portfolio_task_id": task_id, "portfolio_workflow_id": workflow_id or None})
     trigger = client.trigger_task_run(
         task_id=task_id,
         workflow_id=workflow_id or None,
@@ -512,21 +516,26 @@ def source_domain(url: Any) -> str:
 
 
 
-def source_type_from_url(url: Any) -> str:
+def source_type_from_url(url: Any, owned_domains: set[str] | list[str] | None = None) -> str:
+    """Classify a URL's source type.
+
+    When *owned_domains* is supplied, any URL whose domain matches is classified
+    as 'owned_oem'. Otherwise the function falls back to generic heuristics
+    without hardcoded brand names.
+    """
     d = source_domain(url)
     u = str(url or "").lower()
     if not d:
         return "external_citation"
-    if "nissan" in d:
-        return "owned_oem"
-    if any(x in d for x in ["toyota", "honda", "mazda", "subaru", "mitsubishi", "tesla", "hyundai", "kia", "bmw", "mercedes", "volkswagen"]):
-        return "competitor_owned"
+    # Check against explicitly provided owned domains
+    if owned_domains:
+        bare = d.removeprefix("www.")
+        if d in owned_domains or bare in owned_domains or f"www.{bare}" in owned_domains:
+            return "owned_oem"
     if any(x in d for x in ["youtube", "reddit", "x.com", "twitter", "facebook", "instagram"]):
         return "forum_social_video"
-    if any(x in d for x in ["chademo", "e-mobipower", "shutoko", "meti", "mlit", "go.jp", "or.jp"]):
+    if any(x in d for x in ["go.jp", "or.jp", ".gov", ".edu"]):
         return "authority_or_partner"
-    if any(x in d for x in ["gazoo", "motorweek", "recharged", "bonnet", "autocar", "carwow", "caranddriver", "carsguide"]):
-        return "publisher_review"
     if "google" in d and "product" in u:
         return "shopping_result"
     return "external_citation"
@@ -957,6 +966,8 @@ def trigger_auditor_if_configured(req: dict[str, Any], target_run_id: str, portf
     if not client.enabled:
         write_run_status(target_run_id, "running", {"stage": "auditor_skipped", "auditor_skip_reason": "BODHI_PAT_TOKEN not set"})
         return None
+    if not workflow_id:
+        workflow_id = client.get_task_default_workflow_id(task_id) or ""
     max_external = req.get("max_external_sources_per_query") or req.get("max_external_citations_per_query") or 3
     inputs = {
         "brand": req.get("brand"),
@@ -973,7 +984,7 @@ def trigger_auditor_if_configured(req: dict[str, Any], target_run_id: str, portf
         "max_external_citations_per_query": max_external,
         "query_limit": req.get("query_limit") or 50,
     }
-    write_run_status(target_run_id, "running", {"stage": "auditor_queued", "auditor_task_id": task_id})
+    write_run_status(target_run_id, "running", {"stage": "auditor_queued", "auditor_task_id": task_id, "auditor_workflow_id": workflow_id or None})
     trigger = client.trigger_task_run(task_id, workflow_id or None, f"Auditor - {target_run_id}", inputs)
     rid = client.extract_run_id(trigger)
     write_run_status(target_run_id, "running", {"stage": "auditor_run_created", "bodhi_auditor_run_id": rid, "trigger_response": trigger})
@@ -1020,6 +1031,34 @@ def run_phase2_refresh(job_id: str, req: dict[str, Any]) -> None:
         elif mode == "synthetic":
             portfolio = trigger_and_wait_for_portfolio(req, target_run_id)
             portfolio_id = portfolio.get("portfolio_id")
+        elif mode == "upload":
+            # Custom portfolio uploaded via the Refresh Evidence screen.
+            # The portfolio JSON is passed inline in the request as 'custom_portfolio'
+            # or 'uploaded_portfolio', or as a pre-stored portfolio_id.
+            custom = req.get("custom_portfolio") or req.get("uploaded_portfolio")
+            if isinstance(custom, str) and custom.strip():
+                try:
+                    custom = json.loads(custom)
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"Invalid JSON in custom_portfolio: {e}")
+            if isinstance(custom, dict) and (custom.get("queries") or custom.get("topics")):
+                from app.portfolio_schema import validate_portfolio, normalise_uploaded_portfolio
+                validation = validate_portfolio(custom)
+                if not validation["valid"]:
+                    raise RuntimeError(f"Uploaded portfolio validation failed: {'; '.join(validation['errors'][:5])}")
+                normalised = normalise_uploaded_portfolio(custom, brand=req.get("brand", ""), market=req.get("market", ""), domain=req.get("domain"))
+                portfolio = store_portfolio(normalised, req.get("brand", ""), req.get("market", ""), req.get("domain"))
+                portfolio_id = portfolio.get("portfolio_id")
+                write_run_status(target_run_id, "running", {
+                    "stage": "portfolio_upload_stored",
+                    "query_portfolio_id": portfolio_id,
+                    "portfolio_query_count": len(portfolio.get("queries") or []),
+                    "portfolio_topic_count": len(portfolio.get("topics") or []),
+                    "portfolio_source": "user_upload",
+                    "portfolio_validation": validation,
+                })
+            else:
+                raise RuntimeError("query_portfolio_mode is 'upload' but no valid custom_portfolio was provided in the request")
         elif mode in {"manual", "manual_topics_and_queries"}:
             manual = req.get("manual_queries_json") or req.get("queries_json") or req.get("topics_json")
             if isinstance(manual, str) and manual.strip():

@@ -25,8 +25,9 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 class CrawlRequest(BaseModel):
     source_run_id: str
     target_run_id: str
-    brand: str = "Nissan"
-    market: str = "Japan"
+    brand: str = ""
+    market: str = ""
+    owned_domains: list[str] = []
     crawl_owned: bool = True
     crawl_external: bool = True
     max_owned_urls: int = 5
@@ -283,12 +284,29 @@ def run_crawl_job(job_id: str, req: CrawlRequest):
 
         copy_baseline_files(source_dir, target_dir)
 
-        owned_domains = {
-            "nissan.co.jp",
-            "www.nissan.co.jp",
-            "www2.nissan.co.jp",
-            "www3.nissan.co.jp",
-        }
+        # Use owned_domains from request; fall back to extracting from domain field
+        if req.owned_domains:
+            owned_domains = set()
+            for d in req.owned_domains:
+                d = d.strip().lower()
+                if d.startswith("http"):
+                    from urllib.parse import urlparse as _up
+                    d = _up(d).netloc or d
+                if d:
+                    owned_domains.add(d)
+        else:
+            # Derive from brand domain if available
+            owned_domains = set()
+            domain_field = getattr(req, 'domain', '') or ''
+            if domain_field:
+                from urllib.parse import urlparse as _up
+                host = _up(domain_field).netloc or domain_field.replace('https://', '').replace('http://', '').split('/')[0]
+                if host:
+                    owned_domains.add(host)
+                    if host.startswith('www.'):
+                        owned_domains.add(host[4:])
+                    else:
+                        owned_domains.add(f'www.{host}')
 
         inventory_files = [
             source_dir / "audit_context.json",

@@ -9,11 +9,11 @@ import shutil
 import sys
 import zipfile
 from app.evidence_jobs import router as evidence_jobs_router
-from app.parity_jobs import router as parity_jobs_router
-from app.parity_safe_jobs import router as parity_safe_jobs_router
-from app.parity_parallel_jobs import router as parity_parallel_jobs_router
+# parity_jobs, parity_safe_jobs, parity_parallel_jobs removed — stale duplicates with hardcoded brand references.
+# All evidence collection is handled by evidence_jobs.py.
 from app.bodhi_compact import router as bodhi_compact_router
 from app.report_store import router as report_store_router
+from app.brand_config import router as brand_config_router
 
 
 app = FastAPI(title="AI Visibility Evidence Service")
@@ -163,9 +163,9 @@ def seed_from_zip(zip_path: Path, brand: str, market: str, run_id: str):
 @app.post("/admin/seed-run")
 async def seed_run(
     file: UploadFile = File(...),
-    brand: str = Form("Nissan"),
-    market: str = Form("Japan"),
-    run_id: str = Form("nissan_japan_demo_v1"),
+    brand: str = Form(""),
+    market: str = Form(""),
+    run_id: str = Form(""),
     x_admin_token: Optional[str] = Header(None)
 ):
     if ADMIN_SEED_TOKEN and x_admin_token != ADMIN_SEED_TOKEN:
@@ -283,12 +283,10 @@ app.include_router(crawl_jobs_router)
 
 app.include_router(evidence_jobs_router)
 
-app.include_router(parity_jobs_router)
-
-app.include_router(parity_safe_jobs_router)
-
-app.include_router(parity_parallel_jobs_router)
+# parity routers removed — stale duplicates.
 
 app.include_router(bodhi_compact_router)
 
 app.include_router(report_store_router)
+
+app.include_router(brand_config_router)

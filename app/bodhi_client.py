@@ -61,6 +61,21 @@ class BodhiClient:
             payload["overrides"] = overrides
         return self._request("POST", f"/api/v1/tasks/{task_id}/runs", data=json.dumps(payload))
 
+    def get_task(self, task_id: str) -> Any:
+        return self._request("GET", f"/api/v1/tasks/{task_id}")
+
+    def get_task_default_workflow_id(self, task_id: str) -> str | None:
+        payload = self.get_task(task_id)
+        if not isinstance(payload, dict):
+            return None
+        additional = payload.get("additionalData")
+        if isinstance(additional, dict) and additional.get("defaultWorkflow"):
+            return str(additional["defaultWorkflow"])
+        for key in ("defaultWorkflow", "workflowId", "workflow_id"):
+            if payload.get(key):
+                return str(payload[key])
+        return None
+
     def list_task_runs(self, task_id: str) -> Any:
         return self._request("GET", f"/api/v1/tasks/{task_id}/runs")
 
@@ -128,7 +143,7 @@ class BodhiClient:
         """Submit the first pending HITL/UI-node task for a Bodhi run.
 
         Bodhi API-created runs pause at UI nodes. The expected response object is
-        the UI field-label dictionary, e.g. {"brand": "Nissan", ...}.
+        the UI field-label dictionary, e.g. {"brand": "Acme", ...}.
         """
         timeout = timeout_seconds if timeout_seconds is not None else int(os.getenv("BODHI_HITL_TIMEOUT_SECONDS", "240"))
         poll = poll_seconds if poll_seconds is not None else int(os.getenv("BODHI_HITL_POLL_SECONDS", "2"))

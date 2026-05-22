@@ -147,13 +147,27 @@ def dedupe_queries(values: Iterable[Any]) -> List[Any]:
     return dedupe_list(values or [], key=k)
 
 
-def keyword_tokens(*values: str) -> List[str]:
+# Module-level brand stop-words. Callers should set this via set_brand_stop_words()
+# before invoking keyword_tokens(). Defaults are generic; no brand-specific terms.
+_BRAND_STOP_WORDS: set[str] = set()
+
+
+def set_brand_stop_words(terms: list[str] | set[str] | None) -> None:
+    """Configure brand-specific stop-words for keyword_tokens()."""
+    global _BRAND_STOP_WORDS
+    _BRAND_STOP_WORDS = {t.strip().lower() for t in (terms or []) if t and t.strip()}
+
+
+def keyword_tokens(*values: str, extra_stop: set[str] | None = None) -> List[str]:
     text = ' '.join(v or '' for v in values).lower()
     tokens = re.findall(r'[a-z0-9一-龥ぁ-んァ-ンー]+', text)
     stop = {
         'the','and','for','with','from','that','this','what','how','can','are','into','page','html','www','https','http','co','jp','com',
-        'nissan','日産','ニッサン','new','vehicles','vehicle','cars','car','japan','japanese','details','specifications','model','models'
+        'new','vehicles','vehicle','cars','car','details','specifications','model','models'
     }
+    stop |= _BRAND_STOP_WORDS
+    if extra_stop:
+        stop |= extra_stop
     return [t for t in tokens if len(t) > 1 and t not in stop]
 
 
@@ -238,7 +252,7 @@ def clean_markdown_for_scoring(markdown: str) -> str:
     bad_terms = [
         'cookie', 'privacy policy', 'accept all', 'reject all', 'disable the ad blocking', 'javascript', 'ad blocker',
         '企業・ir情報', 'ニュースリリース', 'サステナビリティ', '投資家の皆さまへ', '販売店検索', 'カタログ請求',
-        'nissan online shop', 'corporate website', 'site map', 'サイトマップ', 'faq/お問い合わせ', 'リコール情報'
+        'corporate website', 'site map', 'サイトマップ', 'faq/お問い合わせ', 'リコール情報'
     ]
     kept = []
     for line in text.splitlines():
@@ -490,16 +504,14 @@ def classify_source(url: str, source_name: str = '', title: str = '', cfg: Optio
         source_type = 'owned_brand'
     elif flags['is_owned_ecosystem']:
         source_type = 'owned_ecosystem'
-    elif flags['is_off_market'] or re.search(r'nissan\.(co\.uk|com\.au)|nissanusa|libertyvillenissan|group1nissan|nissan\.co\.th', text):
+    elif flags['is_off_market']:
         source_type = 'off_market_owned'; flags['is_off_market'] = True
-    elif re.search(r'jsae|自動車技術会|spglobal|s&p|kobe-u|\.ac\.jp|go\.jp|meti|mlit|nasva|jncap|jaf|kokusen|enecho|university|standards|regulator|省|庁|機構|oist', text):
+    elif re.search(r'jsae|自動車技術会|spglobal|s&p|\.ac\.jp|go\.jp|\.gov|\.edu|university|standards|regulator|省|庁|機構', text):
         source_type = 'authority_body'
-    elif re.search(r'reuters|nikkei|asahi|yomiuri|bloomberg|japannews|japan news|press|新聞|green car reports', text):
+    elif re.search(r'reuters|nikkei|asahi|yomiuri|bloomberg|press|新聞|news', text):
         source_type = 'news_media'
-    elif re.search(r'bank|finance|loan|leasing|lease|credit|insurance|insurer|ratings|abs', text):
+    elif re.search(r'bank|finance|loan|leasing|lease|credit|insurance|insurer|ratings', text):
         source_type = 'finance_lender'
-    elif re.search(r'toyota|honda|mazda|subaru|mitsubishi|suzuki|lexus|daihatsu', text):
-        source_type = 'competitor_owned'
     elif re.search(r'reddit|facebook|forum|community|quora|x\.com|twitter|minkara', text):
         source_type = 'forum_community'; flags['is_social_or_forum'] = True
     elif re.search(r'youtube|youtu\.be|tiktok|instagram', text):

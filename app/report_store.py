@@ -750,14 +750,20 @@ class PortfolioRequest(BaseModel):
 
 
 class RefreshEvidenceRequest(BaseModel):
-    brand: str = "Nissan"
-    market: str = "Japan"
+    brand: str = ""
+    market: str = ""
     domain: str | None = None
     evidence_service_url: str | None = None
     source_run_id: str | None = None
     target_run_id: str | None = None
     mode: str = "refresh_owned_pages"
     run_mode: str | None = None
+
+    # Multi-brand/multi-market parameterisation.
+    # owned_domains: list of domains the brand owns (e.g. ["toyota.de", "www.toyota.de"]).
+    # brand_terms: list of brand-specific terms for stop-word/classifier logic.
+    owned_domains: list[str] = Field(default_factory=list)
+    brand_terms: list[str] = Field(default_factory=list)
 
     # Query portfolio orchestration. Synthetic mode is handled by Railway evidence
     # service through the Bodhi Brand Topic Query Builder task.
@@ -954,6 +960,92 @@ def store_query_portfolio(req: PortfolioRequest, x_admin_token: str | None = Hea
     write_json(portfolio_dir() / "latest" / f"{latest_key}.json", payload)
     write_json(portfolio_dir() / "latest" / f"{safe_brand_market_domain(req.brand, req.market)}.json", payload)
     return {"status": "stored", "portfolio_id": portfolio_id, "portfolio": payload}
+
+
+@router.post("/portfolios/upload")
+async def upload_query_portfolio(
+    request: Request,
+    brand: str = Query(""),
+    market: str = Query(""),
+    domain: str | None = Query(default=None),
+    x_admin_token: str | None = Header(default=None),
+):
+    """Upload a custom query portfolio via JSON body.
+
+    Validates the portfolio against the brand_topic_query_portfolio.v1 schema,
+    normalises it, stores it, and returns the stored portfolio with validation results.
+    """
+    require_admin(x_admin_token)
+    from app.portfolio_schema import validate_portfolio, normalise_uploaded_portfolio
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+    # Allow brand/market/domain from query params or from the JSON body.
+    effective_brand = brand.strip() or str(body.get("brand") or "").strip()
+    effective_market = market.strip() or str(body.get("market") or "").strip()
+    effective_domain = (domain or "").strip() or str(body.get("domain") or "").strip() or None
+
+    if not effective_brand:
+        raise HTTPException(status_code=400, detail="'brand' is required (query param or in JSON body)")
+    if not effective_market:
+        raise HTTPException(status_code=400, detail="'market' is required (query param or in JSON body)")
+
+    # Validate
+    validation = validate_portfolio(body)
+    if not validation["valid"]:
+        return {
+            "status": "validation_failed",
+            "errors": validation["errors"],
+            "warnings": validation["warnings"],
+            "stats": validation.get("stats", {}),
+        }
+
+    # Normalise and store
+    normalised = normalise_uploaded_portfolio(body, brand=effective_brand, market=effective_market, domain=effective_domain)
+    stored = store_portfolio_helper(normalised, effective_brand, effective_market, effective_domain)
+
+    return {
+        "status": "stored",
+        "portfolio_id": stored.get("portfolio_id"),
+        "validation": validation,
+        "portfolio": stored,
+    }
+
+
+def store_portfolio_helper(portfolio: dict[str, Any], brand: str, market: str, domain: str | None = None) -> dict[str, Any]:
+    """Store a portfolio and update latest index. Shared by upload and POST /portfolios."""
+    portfolio_id = portfolio.get("portfolio_id") or f"portfolio_{normalise_key(brand)}_{normalise_key(market)}_{now_epoch()}_{uuid.uuid4().hex[:6]}"
+    portfolio["portfolio_id"] = portfolio_id
+    portfolio.setdefault("schema_version", "brand_topic_query_portfolio.v1")
+    portfolio["created_at_epoch"] = now_epoch()
+    write_json(portfolio_dir() / f"{portfolio_id}.json", portfolio)
+
+    latest_key = safe_brand_market_domain(brand, market, domain)
+    write_json(portfolio_dir() / "latest" / f"{latest_key}.json", portfolio)
+    write_json(portfolio_dir() / "latest" / f"{safe_brand_market_domain(brand, market)}.json", portfolio)
+    return portfolio
+
+
+@router.get("/portfolios/template")
+def get_portfolio_template(
+    brand: str = Query(default=""),
+    market: str = Query(default=""),
+    domain: str = Query(default=""),
+):
+    """Download a portfolio template with example data and instructions."""
+    from app.portfolio_schema import generate_portfolio_template
+    return generate_portfolio_template(brand=brand, market=market, domain=domain)
+
+
+@router.post("/portfolios/validate")
+async def validate_portfolio_endpoint(request: Request):
+    """Validate a portfolio JSON without storing it."""
+    from app.portfolio_schema import validate_portfolio
+    body = await request.json()
+    result = validate_portfolio(body)
+    return result
 
 
 @router.get("/portfolios/latest")
