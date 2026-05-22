@@ -147,24 +147,13 @@ def dedupe_queries(values: Iterable[Any]) -> List[Any]:
     return dedupe_list(values or [], key=k)
 
 
-# Default brand-specific stop words for backward compatibility.
-# New callers should pass brand_terms to keyword_tokens() for multi-brand support.
-_DEFAULT_BRAND_STOP_WORDS: set[str] = {'nissan', '日産', 'ニッサン'}
-
-
-def keyword_tokens(*values: str, brand_terms: Iterable[str] | None = None) -> List[str]:
-    """Tokenise text for keyword matching, removing common stop words.
-
-    *brand_terms* allows callers to supply brand-specific stop words
-    (e.g. ['toyota', 'トヨタ']) instead of the hardcoded Nissan defaults.
-    """
+def keyword_tokens(*values: str) -> List[str]:
     text = ' '.join(v or '' for v in values).lower()
-    tokens = re.findall(r'[a-z0-9\u3041-\u3093\u30a1-\u30f3\u4e00-\u9fff]+', text)
-    brand_stop = set(t.lower() for t in (brand_terms or [])) if brand_terms else _DEFAULT_BRAND_STOP_WORDS
+    tokens = re.findall(r'[a-z0-9一-龥ぁ-んァ-ンー]+', text)
     stop = {
         'the','and','for','with','from','that','this','what','how','can','are','into','page','html','www','https','http','co','jp','com',
-        'new','vehicles','vehicle','cars','car','japan','japanese','details','specifications','model','models'
-    } | brand_stop
+        'nissan','日産','ニッサン','new','vehicles','vehicle','cars','car','japan','japanese','details','specifications','model','models'
+    }
     return [t for t in tokens if len(t) > 1 and t not in stop]
 
 
@@ -249,7 +238,7 @@ def clean_markdown_for_scoring(markdown: str) -> str:
     bad_terms = [
         'cookie', 'privacy policy', 'accept all', 'reject all', 'disable the ad blocking', 'javascript', 'ad blocker',
         '企業・ir情報', 'ニュースリリース', 'サステナビリティ', '投資家の皆さまへ', '販売店検索', 'カタログ請求',
-        'online shop', 'corporate website', 'site map', 'サイトマップ', 'faq/お問い合わせ', 'リコール情報'
+        'nissan online shop', 'corporate website', 'site map', 'サイトマップ', 'faq/お問い合わせ', 'リコール情報'
     ]
     kept = []
     for line in text.splitlines():
@@ -482,22 +471,6 @@ def score_text_features(markdown: str, query: str = '', weights: Optional[Dict[s
     }
 
 
-def _is_off_market_owned(text: str, cfg: Optional[Dict[str, Any]] = None) -> bool:
-    """Check if a URL text matches off-market owned domain patterns.
-
-    Uses configurable patterns from cfg['off_market_patterns'] when available,
-    falling back to built-in Nissan patterns for backward compatibility.
-    """
-    patterns = (cfg or {}).get('off_market_patterns', [])
-    if patterns:
-        for pat in patterns:
-            if re.search(pat, text, re.I):
-                return True
-        return False
-    # Backward compatibility: Nissan off-market patterns
-    return bool(re.search(r'nissan\.(co\.uk|com\.au)|nissanusa|libertyvillenissan|group1nissan|nissan\.co\.th', text))
-
-
 def classify_source(url: str, source_name: str = '', title: str = '', cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = cfg or get_config()
     host = domain_of(url)
@@ -517,7 +490,7 @@ def classify_source(url: str, source_name: str = '', title: str = '', cfg: Optio
         source_type = 'owned_brand'
     elif flags['is_owned_ecosystem']:
         source_type = 'owned_ecosystem'
-    elif flags['is_off_market'] or _is_off_market_owned(text, cfg):
+    elif flags['is_off_market'] or re.search(r'nissan\.(co\.uk|com\.au)|nissanusa|libertyvillenissan|group1nissan|nissan\.co\.th', text):
         source_type = 'off_market_owned'; flags['is_off_market'] = True
     elif re.search(r'jsae|自動車技術会|spglobal|s&p|kobe-u|\.ac\.jp|go\.jp|meti|mlit|nasva|jncap|jaf|kokusen|enecho|university|standards|regulator|省|庁|機構|oist', text):
         source_type = 'authority_body'

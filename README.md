@@ -31,27 +31,15 @@ PUBLIC_EVIDENCE_SERVICE_URL=https://ai-visibility-evidence-service-production.up
 Required for synthetic portfolio orchestration:
 
 ```text
-BODHI_API_BASE_URL=https://sapientaiproducts.com/save
+BODHI_API_BASE_URL=https://psaisuite.com/save
 BODHI_PAT_TOKEN=pat_<token>
-# Staging: 912b17f6-819c-437c-9807-4efe44027061
 BODHI_PORTFOLIO_TASK_ID=<BrandTopicQueryBuilder task id>
 BODHI_PORTFOLIO_WORKFLOW_ID=<optional workflow id>
-BODHI_ALLOW_WORKFLOW_OVERRIDE=false
-BODHI_PORTFOLIO_LOCAL_FALLBACK=true
-BODHI_PORTFOLIO_HITL_REQUIRED=false
-BODHI_PORTFOLIO_HITL_TIMEOUT_SECONDS=45
 ```
-
-`BODHI_ALLOW_WORKFLOW_OVERRIDE` should stay `false` for API-triggered UI-node
-portfolio workflows unless Bodhi confirms the task/run metadata contains an
-iterable `exec_metadata.workflow[workflowId].nodes` graph. If the portfolio
-workflow fails before its UI node, `BODHI_PORTFOLIO_LOCAL_FALLBACK=true` lets the
-refresh proceed with a deterministic, clearly labelled local portfolio.
 
 Required if the service should trigger the Auditor after evidence refresh:
 
 ```text
-# Staging: 3166f133-2558-4473-9adb-d3ea8171ec2e
 BODHI_AUDITOR_TASK_ID=<Auditor task id>
 BODHI_AUDITOR_WORKFLOW_ID=<optional workflow id>
 ```
@@ -143,13 +131,10 @@ Recommended env vars:
 ```text
 BODHI_API_BASE_URL=https://sapientaiproducts.com/save
 BODHI_PAT_TOKEN=pat_<token_with_tasks_execute_tasks_read_workflows_read>
-# Staging: 912b17f6-819c-437c-9807-4efe44027061
 BODHI_PORTFOLIO_TASK_ID=<Brand Topic Query Builder task id>
 BODHI_PORTFOLIO_WORKFLOW_ID=<Brand Topic Query Builder workflow id>
-BODHI_ALLOW_WORKFLOW_OVERRIDE=false
-BODHI_PORTFOLIO_LOCAL_FALLBACK=true
-BODHI_PORTFOLIO_HITL_REQUIRED=false
-BODHI_PORTFOLIO_HITL_TIMEOUT_SECONDS=45
+BODHI_PORTFOLIO_HITL_REQUIRED=true
+BODHI_HITL_TIMEOUT_SECONDS=300
 BODHI_HITL_POLL_SECONDS=2
 ```
 

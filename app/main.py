@@ -4,81 +4,24 @@ from pathlib import Path
 from typing import Optional
 
 import json
-import logging
 import os
 import shutil
 import sys
 import zipfile
 from app.evidence_jobs import router as evidence_jobs_router
+from app.parity_jobs import router as parity_jobs_router
+from app.parity_safe_jobs import router as parity_safe_jobs_router
+from app.parity_parallel_jobs import router as parity_parallel_jobs_router
 from app.bodhi_compact import router as bodhi_compact_router
 from app.report_store import router as report_store_router
 
-# --- Structured logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
-logger = logging.getLogger("evidence-service")
 
-
-app = FastAPI(
-    title="AI Visibility Evidence Service",
-    version="4.0.0",
-    description="Production evidence collection, storage and report delivery for AI Brand Visibility.",
-)
+app = FastAPI(title="AI Visibility Evidence Service")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data/evidence-runs"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 ADMIN_SEED_TOKEN = os.getenv("ADMIN_SEED_TOKEN", "ad6878sd8d87sd87")
-
-
-# --- Environment variable validation on startup (Task 19) ---
-def validate_environment() -> dict:
-    """Validate required and recommended environment variables on startup."""
-    warnings: list[str] = []
-    info: list[str] = []
-
-    # Required for core operation
-    data_dir = os.getenv("DATA_DIR")
-    if not data_dir:
-        warnings.append("DATA_DIR not set; defaulting to /data/evidence-runs")
-    else:
-        info.append(f"DATA_DIR={data_dir}")
-
-    # Required for Bodhi integration
-    bodhi_pat = os.getenv("BODHI_PAT_TOKEN", "")
-    if not bodhi_pat:
-        warnings.append("BODHI_PAT_TOKEN not set; Bodhi workflow triggers will fail")
-
-    # Required for external URL
-    public_url = os.getenv("PUBLIC_EVIDENCE_SERVICE_URL", "")
-    if not public_url:
-        warnings.append("PUBLIC_EVIDENCE_SERVICE_URL not set; Bodhi callbacks may fail")
-
-    # Optional but recommended
-    serpapi_key = os.getenv("SERPAPI_KEY", "")
-    if not serpapi_key:
-        info.append("SERPAPI_KEY not set; SerpAPI collection will be disabled")
-
-    portfolio_task = os.getenv("BODHI_PORTFOLIO_TASK_ID", "")
-    auditor_task = os.getenv("BODHI_AUDITOR_TASK_ID", "")
-    if not portfolio_task:
-        info.append("BODHI_PORTFOLIO_TASK_ID not set; synthetic portfolio generation unavailable")
-    if not auditor_task:
-        info.append("BODHI_AUDITOR_TASK_ID not set; auditor auto-trigger unavailable")
-
-    for w in warnings:
-        logger.warning("ENV: %s", w)
-    for i in info:
-        logger.info("ENV: %s", i)
-
-    return {"warnings": warnings, "info": info}
-
-
-startup_env_check = validate_environment()
-logger.info("Evidence Service v4.0.0 starting on port %s", os.getenv("PORT", "8000"))
 
 REQUIRED_FILES = {
     "audit_context.json": [
@@ -220,9 +163,9 @@ def seed_from_zip(zip_path: Path, brand: str, market: str, run_id: str):
 @app.post("/admin/seed-run")
 async def seed_run(
     file: UploadFile = File(...),
-    brand: str = Form(""),
-    market: str = Form(""),
-    run_id: str = Form(""),
+    brand: str = Form("Nissan"),
+    market: str = Form("Japan"),
+    run_id: str = Form("nissan_japan_demo_v1"),
     x_admin_token: Optional[str] = Header(None)
 ):
     if ADMIN_SEED_TOKEN and x_admin_token != ADMIN_SEED_TOKEN:
@@ -322,52 +265,29 @@ def debug_routes():
 
 @app.get("/health")
 def health():
-    """Basic health check for Railway/load balancer probes."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
     return {
         "status": "ok",
         "service": "ai-visibility-evidence-service",
-        "version": "4.0.0",
         "python": sys.version,
         "data_dir": str(DATA_DIR),
         "data_dir_exists": DATA_DIR.exists(),
         "data_dir_is_dir": DATA_DIR.is_dir(),
         "volume_root_exists": Path("/data").exists(),
         "volume_root_is_dir": Path("/data").is_dir(),
-        "port_env": os.getenv("PORT"),
-    }
-
-
-@app.get("/health/deep")
-def health_deep():
-    """Deep health check: verifies data volume, latest-successful index, and env config."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    latest_dir = DATA_DIR / "latest_successful"
-    status_dir = DATA_DIR / "run_status"
-    portfolio_dir = DATA_DIR / "portfolios"
-
-    run_dirs = [d.name for d in DATA_DIR.iterdir() if d.is_dir() and not d.name.startswith("_") and d.name not in {"latest", "latest_successful", "run_status", "portfolios"}] if DATA_DIR.exists() else []
-    latest_indexes = [f.stem for f in latest_dir.glob("*.json")] if latest_dir.exists() else []
-
-    return {
-        "status": "ok",
-        "service": "ai-visibility-evidence-service",
-        "version": "4.0.0",
-        "data_dir": str(DATA_DIR),
-        "data_dir_writable": os.access(str(DATA_DIR), os.W_OK),
-        "run_count": len(run_dirs),
-        "latest_successful_indexes": latest_indexes,
-        "status_dir_exists": status_dir.exists(),
-        "portfolio_dir_exists": portfolio_dir.exists(),
-        "env_warnings": startup_env_check.get("warnings", []),
-        "bodhi_pat_configured": bool(os.getenv("BODHI_PAT_TOKEN", "")),
-        "serpapi_configured": bool(os.getenv("SERPAPI_KEY", "")),
-        "public_url_configured": bool(os.getenv("PUBLIC_EVIDENCE_SERVICE_URL", "")),
+        "port_env": os.getenv("PORT")
     }
 
 app.include_router(crawl_jobs_router)
 
 app.include_router(evidence_jobs_router)
+
+app.include_router(parity_jobs_router)
+
+app.include_router(parity_safe_jobs_router)
+
+app.include_router(parity_parallel_jobs_router)
 
 app.include_router(bodhi_compact_router)
 

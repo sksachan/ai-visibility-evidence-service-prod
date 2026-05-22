@@ -1,38 +1,23 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-venv/
 .venv/
-*.egg-info/
+venv/
+__pycache__/
+*/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
 dist/
 build/
-
-# Environment
 .env
-.env.local
-.env.*.local
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
+.env.*
+!.env.example
 .DS_Store
-Thumbs.db
-
-# Data (local development)
-/data/
-/tmp/
-
-# Test
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Ruff
-.ruff_cache/
+runs/
+data/
+tmp/
+outputs/
+storage/
+*.log
+playwright-report/
+test-results/

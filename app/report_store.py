@@ -482,27 +482,11 @@ def load_valid_report_bundle(run_id: str) -> dict[str, Any] | None:
     return None
 
 def update_latest_successful_index(manifest: dict[str, Any]) -> None:
-    """Update the latest-successful index only for completed, dashboard-ready runs.
-
-    This is the single gate that controls what the frontend sees as 'latest'.
-    An in-progress or failed run must never be written here.
-    """
-    import logging
-    logger = logging.getLogger("evidence-service.report_store")
-
     brand = manifest.get("brand")
     market = manifest.get("market")
     domain = manifest.get("domain")
     if not brand or not market:
-        logger.warning("Cannot update latest-successful index: brand=%s market=%s", brand, market)
         return
-
-    # Safety guard: never promote non-completed runs
-    status = str(manifest.get("status", "")).lower()
-    if status in IN_PROGRESS_STATES or status in FAILED_STATES:
-        logger.warning("Refusing to promote run_id=%s to latest-successful: status=%s", manifest.get("run_id"), status)
-        return
-
     latest_index_dir().mkdir(parents=True, exist_ok=True)
     keys = [
         safe_brand_market_domain(brand, market),
@@ -766,21 +750,14 @@ class PortfolioRequest(BaseModel):
 
 
 class RefreshEvidenceRequest(BaseModel):
-    brand: str = ""
-    market: str = ""
+    brand: str = "Nissan"
+    market: str = "Japan"
     domain: str | None = None
     evidence_service_url: str | None = None
     source_run_id: str | None = None
     target_run_id: str | None = None
     mode: str = "refresh_owned_pages"
     run_mode: str | None = None
-
-    # Multi-brand support: owned domains and brand-specific NLP terms.
-    owned_domains: list[str] = Field(default_factory=list)
-    brand_terms: list[str] = Field(default_factory=list)
-
-    # Custom portfolio upload support.
-    custom_portfolio: dict[str, Any] | None = None
 
     # Query portfolio orchestration. Synthetic mode is handled by Railway evidence
     # service through the Bodhi Brand Topic Query Builder task.
@@ -818,17 +795,11 @@ class RefreshEvidenceRequest(BaseModel):
 
 @router.post("/runs/{run_id}/report-bundle")
 async def store_report_bundle(run_id: str, request: Request, x_admin_token: str | None = Header(default=None)):
-    """Store a report bundle for a run. Idempotent: re-storing the same run_id overwrites safely."""
-    import logging
-    logger = logging.getLogger("evidence-service.report_store")
-
     # Report writes can be protected by ADMIN_TOKEN. If ADMIN_TOKEN is unset, local/dev mode remains open.
     require_admin(x_admin_token)
     bundle = await request.json()
     if not isinstance(bundle, dict):
         raise HTTPException(status_code=400, detail="Report bundle must be a JSON object")
-
-    logger.info("Storing report bundle for run_id=%s, keys=%s", run_id, list(bundle.keys())[:10])
     bundle = enrich_report_bundle(run_id, bundle)
 
     is_dashboard_ready = has_recognised_report_payload(bundle)
@@ -859,14 +830,12 @@ async def store_report_bundle(run_id: str, request: Request, x_admin_token: str 
     manifest["dashboard_ready"] = is_dashboard_ready
     if not is_dashboard_ready:
         manifest["validation_error"] = "Stored report bundle does not contain a recognised dashboard payload; it was not promoted to latest successful."
-        logger.warning("Report bundle for run_id=%s is NOT dashboard-ready; not promoting to latest-successful", run_id)
 
     write_json(rdir / "report_manifest.json", manifest)
     write_json(rdir / "run_manifest.json", {**(read_json(rdir / "run_manifest.json", {}) or {}), **manifest})
     write_run_status(run_id, "completed" if is_dashboard_ready else "completed_invalid_report", manifest)
     if is_dashboard_ready:
         update_latest_successful_index(manifest)
-        logger.info("Report bundle for run_id=%s promoted to latest-successful for %s/%s", run_id, manifest.get('brand'), manifest.get('market'))
     return {"status": "stored" if is_dashboard_ready else "stored_not_promoted", "manifest": manifest}
 
 
@@ -880,10 +849,6 @@ def get_report_bundle(run_id: str):
 
 @router.get("/runs/latest/report-bundle")
 def get_latest_report_bundle(brand: str = Query(...), market: str = Query(...), domain: str | None = None):
-    """Return the latest *successful* report bundle. Never returns an in-progress run."""
-    import logging
-    logger = logging.getLogger("evidence-service.report_store")
-
     key_candidates = []
     if domain:
         key_candidates.append(safe_brand_market_domain(brand, market, domain))
@@ -898,16 +863,7 @@ def get_latest_report_bundle(brand: str = Query(...), market: str = Query(...), 
     if not manifest:
         manifest = scan_latest_successful(brand, market, domain)
     if not manifest:
-        logger.info("No latest-successful manifest found for brand=%s market=%s", brand, market)
         raise HTTPException(status_code=404, detail="No latest successful report bundle found")
-
-    # Guard: never return an in-progress run as latest-successful
-    manifest_status = str(manifest.get("status", "")).lower()
-    if manifest_status in IN_PROGRESS_STATES:
-        logger.warning("Latest index pointed to in-progress run %s; scanning for completed run", manifest.get("run_id"))
-        manifest = scan_latest_successful(brand, market, domain)
-        if not manifest:
-            raise HTTPException(status_code=404, detail="No completed report bundle found; latest run is still in progress")
 
     bundle = load_valid_report_bundle(manifest["run_id"])
     if not bundle:
@@ -918,7 +874,6 @@ def get_latest_report_bundle(brand: str = Query(...), market: str = Query(...), 
         if fallback and fallback.get("run_id") != manifest.get("run_id"):
             bundle = load_valid_report_bundle(fallback["run_id"])
             if bundle:
-                logger.info("Fell back to run_id=%s after primary manifest was invalid", fallback.get("run_id"))
                 return bundle
         raise HTTPException(status_code=404, detail="Latest manifest exists but no dashboard-ready report bundle was found")
     return bundle
@@ -1015,88 +970,6 @@ def get_latest_query_portfolio(brand: str = Query(...), market: str = Query(...)
         if payload:
             return payload
     raise HTTPException(status_code=404, detail="No latest portfolio found")
-
-
-@router.post("/portfolios/upload")
-async def upload_custom_portfolio(request: Request, x_admin_token: str | None = Header(default=None)):
-    """Upload a custom topic/query portfolio from the frontend.
-
-    Accepts a JSON body with ``topics[]`` and ``queries[]`` arrays.
-    Validates the portfolio schema and stores it for use in evidence refreshes.
-    Returns the stored portfolio with its generated portfolio_id.
-    """
-    require_admin(x_admin_token)
-    body = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Portfolio must be a JSON object")
-
-    # Validate required fields
-    topics = body.get("topics")
-    queries = body.get("queries")
-    if not isinstance(topics, list) or not topics:
-        raise HTTPException(status_code=400, detail="Portfolio must contain a non-empty 'topics' array")
-    if not isinstance(queries, list) or not queries:
-        raise HTTPException(status_code=400, detail="Portfolio must contain a non-empty 'queries' array")
-
-    # Validate query items have at minimum a 'query' field
-    for i, q in enumerate(queries):
-        if not isinstance(q, dict):
-            raise HTTPException(status_code=400, detail=f"queries[{i}] must be a JSON object")
-        if not q.get("query"):
-            raise HTTPException(status_code=400, detail=f"queries[{i}] must have a non-empty 'query' field")
-
-    # Validate topic items
-    for i, t in enumerate(topics):
-        if isinstance(t, str):
-            body["topics"][i] = {"topic": t, "name": t}
-        elif isinstance(t, dict):
-            if not (t.get("topic") or t.get("name")):
-                raise HTTPException(status_code=400, detail=f"topics[{i}] must have a 'topic' or 'name' field")
-        else:
-            raise HTTPException(status_code=400, detail=f"topics[{i}] must be a string or JSON object")
-
-    brand = str(body.get("brand", "")).strip()
-    market = str(body.get("market", "")).strip()
-    domain = str(body.get("domain", "")).strip() or None
-
-    portfolio_id = body.get("portfolio_id") or f"upload_{normalise_key(brand)}_{normalise_key(market)}_{now_epoch()}_{uuid.uuid4().hex[:6]}"
-    body["portfolio_id"] = portfolio_id
-    body.setdefault("schema_version", "brand_topic_query_portfolio.v1")
-    body["portfolio_source"] = "frontend_upload"
-    body["created_at_epoch"] = now_epoch()
-
-    # Assign query_ids if missing
-    for i, q in enumerate(body["queries"], start=1):
-        q.setdefault("query_id", f"q{i:03d}")
-
-    write_json(portfolio_dir() / f"{portfolio_id}.json", body)
-
-    if brand and market:
-        latest_key = safe_brand_market_domain(brand, market, domain)
-        write_json(portfolio_dir() / "latest" / f"{latest_key}.json", body)
-        write_json(portfolio_dir() / "latest" / f"{safe_brand_market_domain(brand, market)}.json", body)
-
-    return {"status": "uploaded", "portfolio_id": portfolio_id, "topic_count": len(body["topics"]), "query_count": len(body["queries"]), "portfolio": body}
-
-
-@router.get("/portfolios/template")
-def get_portfolio_template():
-    """Return a downloadable portfolio template for custom uploads."""
-    return {
-        "schema_version": "brand_topic_query_portfolio.v1",
-        "brand": "YourBrand",
-        "market": "YourMarket",
-        "domain": "https://www.yourbrand.com",
-        "portfolio_source": "frontend_upload",
-        "topics": [
-            {"topic": "Product Innovation", "name": "Product Innovation", "category": "Product", "description": "Topics about product features and innovation"},
-            {"topic": "Sustainability", "name": "Sustainability", "category": "Brand", "description": "Environmental and sustainability topics"}
-        ],
-        "queries": [
-            {"query": "best electric vehicle range 2026", "topic": "Product Innovation", "intent": "informational", "journey_stage": "awareness", "priority": "high"},
-            {"query": "brand sustainability initiatives", "topic": "Sustainability", "intent": "informational", "journey_stage": "consideration", "priority": "medium"}
-        ]
-    }
 
 
 @router.get("/portfolios/{portfolio_id}")
