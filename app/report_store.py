@@ -707,9 +707,10 @@ def _scan_report_history(brand: str | None, market: str | None, domain: str | No
             continue
         if not bool(manifest.get("dashboard_ready", True)):
             continue
-        if brand and normalise_key(manifest.get("brand")) != normalise_key(brand):
+        # When brand/market are empty or "all", return runs for ALL brands/markets.
+        if brand and brand.lower() != "all" and normalise_key(manifest.get("brand")) != normalise_key(brand):
             continue
-        if market and normalise_key(manifest.get("market")) != normalise_key(market):
+        if market and market.lower() != "all" and normalise_key(manifest.get("market")) != normalise_key(market):
             continue
         if domain and manifest.get("domain") and normalise_key(manifest.get("domain")) != normalise_key(domain):
             continue
