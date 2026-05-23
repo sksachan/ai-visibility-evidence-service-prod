@@ -960,7 +960,28 @@ def get_run_statuses(brand: str | None = None, market: str | None = None, domain
             rows.append(status)
     rows.sort(key=lambda x: x.get("updated_at_epoch") or x.get("created_at_epoch") or 0, reverse=True)
     latest_successful = scan_latest_successful(brand, market, domain)
-    latest_active = next((r for r in rows if str(r.get("status", "")).lower() in IN_PROGRESS_STATES or str(r.get("stage", "")).lower() == "evidence_ready"), None)
+    # A run is only considered active if its status is in-progress AND it has NOT
+    # reached a terminal status (completed/failed/etc.).  The previous logic also
+    # treated "evidence_ready" stage as active, but a completed run can have that
+    # stage if the auditor finished externally.  Now we explicitly exclude terminal
+    # statuses so the frontend correctly shows "Idle" after a run finishes.
+    def _is_truly_active(r: dict[str, Any]) -> bool:
+        st = str(r.get("status", "")).lower()
+        stage = str(r.get("stage", "")).lower()
+        # Never treat completed/failed runs as active
+        if st in SUCCESS_STATES or st in FAILED_STATES:
+            return False
+        if stage in REPORT_READY_STAGES:
+            return False
+        # In-progress status is active
+        if st in IN_PROGRESS_STATES:
+            return True
+        # evidence_ready stage is active only if status is not terminal
+        if stage == "evidence_ready":
+            return True
+        return False
+
+    latest_active = next((r for r in rows if _is_truly_active(r)), None)
     return {
         "status": "ok",
         "latest_successful_run_id": (latest_successful or {}).get("run_id"),
