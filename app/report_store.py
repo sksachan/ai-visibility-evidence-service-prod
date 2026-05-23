@@ -908,6 +908,28 @@ def get_report_by_run_id(run_id: str):
     return get_report_bundle(run_id)
 
 
+@router.delete("/reports/{run_id}")
+def delete_report_by_run_id(run_id: str, x_admin_token: str | None = Header(default=None)):
+    """Delete a run directory and its report bundle. Removes the run from history."""
+    import shutil
+    rdir = run_dir(run_id)
+    if not rdir.exists():
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    try:
+        shutil.rmtree(rdir, ignore_errors=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete run: {exc}")
+    # Also remove from status dir if present
+    sdir = status_dir()
+    status_file = sdir / f"{run_id}.json"
+    if status_file.exists():
+        try:
+            status_file.unlink()
+        except Exception:
+            pass
+    return {"status": "deleted", "run_id": run_id}
+
+
 @router.post("/runs/{run_id}/status")
 def post_run_status(run_id: str, req: RunStatusRequest, x_admin_token: str | None = Header(default=None)):
     require_admin(x_admin_token)
