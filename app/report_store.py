@@ -973,6 +973,17 @@ def get_run_statuses(brand: str | None = None, market: str | None = None, domain
             return False
         if stage in REPORT_READY_STAGES:
             return False
+        # Never treat runs with error fields as active — even if status says "running",
+        # the presence of an error field means the run has terminally failed.
+        # This fixes the dashboard showing "Failed" on every load when a previous run
+        # had status="running" but auditor_error was set.
+        error_fields = ["auditor_error", "portfolio_error", "bodhi_error", "error"]
+        if any(r.get(f) for f in error_fields):
+            return False
+        if stage.endswith("_failed"):
+            return False
+        if r.get("failed") is True:
+            return False
         # In-progress status is active
         if st in IN_PROGRESS_STATES:
             return True
