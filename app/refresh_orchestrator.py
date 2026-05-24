@@ -1160,7 +1160,24 @@ def run_phase2_refresh(job_id: str, req: dict[str, Any]) -> None:
             try:
                 auditor = trigger_auditor_if_configured(req, target_run_id, portfolio_id)
             except Exception as e:
-                write_run_status(target_run_id, "running", {"stage": "auditor_trigger_failed", "auditor_error": str(e)[:500]})
+                # Terminal auditor failure: mark the run as failed, not running.
+                # Preserve latest_successful_run_id so the dashboard can still load the last good report.
+                write_run_status(target_run_id, "failed", {
+                    "stage": "auditor_failed",
+                    "active": False,
+                    "auditor_error": str(e)[:500],
+                    "awaiting_report_bundle": False,
+                    "failed_at_epoch": now_epoch(),
+                    "query_portfolio_id": portfolio_id,
+                })
+                update_job(job_id, {
+                    "status": "failed",
+                    "stage": "auditor_failed",
+                    "error": f"Bodhi auditor trigger failed: {str(e)[:500]}",
+                    "target_run_id": target_run_id,
+                    "failed_at_epoch": now_epoch(),
+                })
+                return  # Do not continue; the run is terminal.
             if auditor:
                 # The Auditor workflow stores /runs/{run_id}/report-bundle when it finishes.
                 # Keep the refresh run active until report_store marks it report_bundle_ready.
