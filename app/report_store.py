@@ -31,6 +31,13 @@ IN_PROGRESS_STATES = {"queued", "accepted", "pending", "running", "in_progress",
 FAILED_STATES = {"failed", "error", "cancelled", "canceled"}
 REPORT_READY_STAGES = {"report_bundle_ready"}
 
+# Stale-run timeouts: if a run has not been updated within these windows,
+# it is no longer considered active even if its status says "running".
+# The auditor timeout is longer because Bodhi workflows can legitimately run
+# for extended periods.  Override via environment variables if needed.
+ACTIVE_RUN_STALE_SECONDS = int(os.environ.get("ACTIVE_RUN_STALE_SECONDS", str(60 * 60)))        # 1 hour
+AUDITOR_ACTIVE_STALE_SECONDS = int(os.environ.get("AUDITOR_ACTIVE_STALE_SECONDS", str(2 * 60 * 60)))  # 2 hours
+
 
 def now_epoch() -> int:
     return int(time.time())
@@ -960,36 +967,58 @@ def get_run_statuses(brand: str | None = None, market: str | None = None, domain
             rows.append(status)
     rows.sort(key=lambda x: x.get("updated_at_epoch") or x.get("created_at_epoch") or 0, reverse=True)
     latest_successful = scan_latest_successful(brand, market, domain)
-    # A run is only considered active if its status is in-progress AND it has NOT
-    # reached a terminal status (completed/failed/etc.).  The previous logic also
-    # treated "evidence_ready" stage as active, but a completed run can have that
-    # stage if the auditor finished externally.  Now we explicitly exclude terminal
-    # statuses so the frontend correctly shows "Idle" after a run finishes.
+
     def _is_truly_active(r: dict[str, Any]) -> bool:
+        """Determine whether a run is genuinely still in progress.
+
+        A run is NOT active if:
+        - Its status is in a terminal set (completed/failed/etc.).
+        - Its stage is a report-ready stage.
+        - It carries any error field (auditor_error, portfolio_error, etc.),
+          even if status still says "running".
+        - Its stage ends with "_failed".
+        - It has not been updated within the stale-run timeout window.
+        """
         st = str(r.get("status", "")).lower()
         stage = str(r.get("stage", "")).lower()
-        # Never treat completed/failed runs as active
+
+        # 1. Terminal status — never active
         if st in SUCCESS_STATES or st in FAILED_STATES:
             return False
+
+        # 2. Report-ready stage — run is done
         if stage in REPORT_READY_STAGES:
             return False
-        # Never treat runs with error fields as active — even if status says "running",
-        # the presence of an error field means the run has terminally failed.
-        # This fixes the dashboard showing "Failed" on every load when a previous run
-        # had status="running" but auditor_error was set.
+
+        # 3. Error fields present — contradictory "running + error" → treat as failed
         error_fields = ["auditor_error", "portfolio_error", "bodhi_error", "error"]
         if any(r.get(f) for f in error_fields):
             return False
+
+        # 4. Stage ends with _failed
         if stage.endswith("_failed"):
             return False
+
+        # 5. Explicit failed flag
         if r.get("failed") is True:
             return False
-        # In-progress status is active
+
+        # 6. Stale timeout — if the run hasn't been updated recently, it's stuck
+        updated_at = _epoch_from_any(r.get("updated_at_epoch") or r.get("started_at_epoch") or r.get("created_at_epoch"))
+        if updated_at > 0:
+            is_auditor_stage = stage.startswith("auditor") or stage == "evidence_ready"
+            stale_limit = AUDITOR_ACTIVE_STALE_SECONDS if is_auditor_stage else ACTIVE_RUN_STALE_SECONDS
+            if (now_epoch() - updated_at) > stale_limit:
+                return False
+
+        # 7. In-progress status is active
         if st in IN_PROGRESS_STATES:
             return True
-        # evidence_ready stage is active only if status is not terminal
+
+        # 8. evidence_ready stage is active (waiting for auditor)
         if stage == "evidence_ready":
             return True
+
         return False
 
     latest_active = next((r for r in rows if _is_truly_active(r)), None)

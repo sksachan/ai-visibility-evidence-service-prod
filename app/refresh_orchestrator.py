@@ -1008,7 +1008,15 @@ def trigger_auditor_if_configured(req: dict[str, Any], target_run_id: str, portf
             })
         except Exception as e:
             hitl = {"error": str(e)[:500]}
-            write_run_status(target_run_id, "running", {"stage": "auditor_ui_hitl_failed", "bodhi_auditor_run_id": rid, "auditor_error": str(e)[:500]})
+            # CRITICAL: Do NOT leave status as "running" when auditor_error is present.
+            # That contradiction causes the frontend to show "Failed" on every page load.
+            write_run_status(target_run_id, "failed", {
+                "stage": "auditor_failed",
+                "active": False,
+                "bodhi_auditor_run_id": rid,
+                "auditor_error": str(e)[:500],
+                "awaiting_report_bundle": False,
+            })
     write_run_status(target_run_id, "running", {"stage": "auditor_running", "bodhi_auditor_run_id": rid})
     return {"bodhi_auditor_run_id": rid, "trigger_response": trigger, "hitl": hitl}
 
