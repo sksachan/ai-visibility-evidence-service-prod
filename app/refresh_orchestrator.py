@@ -968,7 +968,8 @@ def trigger_auditor_if_configured(req: dict[str, Any], target_run_id: str, portf
         return None
     if not workflow_id:
         workflow_id = client.get_task_default_workflow_id(task_id) or ""
-    max_external = req.get("max_external_sources_per_query") or req.get("max_external_citations_per_query") or 3
+    # Canonical name is max_external_citations_per_query; keep max_external_sources_per_query as backward-compatible alias
+    max_external = req.get("max_external_citations_per_query") or req.get("max_external_sources_per_query") or 3
     inputs = {
         "brand": req.get("brand"),
         "market": req.get("market"),
