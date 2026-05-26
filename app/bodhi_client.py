@@ -8,6 +8,14 @@ from typing import Any
 import requests
 
 
+def _clean_env_value(value: str | None) -> str:
+    """Normalise Railway/env values copied from dotenv-style snippets."""
+    cleaned = (value or "").strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
 class BodhiClient:
     """Small Bodhi API client for server-side Railway orchestration.
 
@@ -20,8 +28,8 @@ class BodhiClient:
     """
 
     def __init__(self, base_url: str | None = None, token: str | None = None):
-        self.base_url = (base_url or os.getenv("BODHI_API_BASE_URL") or "https://sapientaiproducts.com/save").rstrip("/")
-        self.token = token or os.getenv("BODHI_PAT_TOKEN") or ""
+        self.base_url = _clean_env_value(base_url or os.getenv("BODHI_API_BASE_URL") or "https://sapientaiproducts.com/save").rstrip("/")
+        self.token = _clean_env_value(token or os.getenv("BODHI_PAT_TOKEN"))
         self.timeout = int(os.getenv("BODHI_HTTP_TIMEOUT_SECONDS", "120"))
 
     @property

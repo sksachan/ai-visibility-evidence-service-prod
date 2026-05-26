@@ -14,6 +14,7 @@ from app.evidence_jobs import router as evidence_jobs_router
 from app.bodhi_compact import router as bodhi_compact_router
 from app.report_store import router as report_store_router
 from app.brand_config import router as brand_config_router
+from app.bodhi_client import BodhiClient
 
 
 app = FastAPI(title="AI Visibility Evidence Service")
@@ -262,6 +263,67 @@ def debug_routes():
             for route in app.routes
         ]
     }
+
+
+@app.get("/admin/bodhi-smoke")
+def admin_bodhi_smoke(create_run: bool = False, x_admin_token: Optional[str] = Header(None)):
+    """Validate Bodhi config from inside the running service without exposing secrets."""
+    if ADMIN_SEED_TOKEN and x_admin_token != ADMIN_SEED_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+    client = BodhiClient()
+    portfolio_task_id = os.getenv("BODHI_PORTFOLIO_TASK_ID", "")
+    portfolio_workflow_id = os.getenv("BODHI_PORTFOLIO_WORKFLOW_ID", "")
+    auditor_task_id = os.getenv("BODHI_AUDITOR_TASK_ID", "")
+    auditor_workflow_id = os.getenv("BODHI_AUDITOR_WORKFLOW_ID", "")
+
+    result = {
+        "bodhi_api_base_url": client.base_url,
+        "has_bodhi_pat_token": bool(client.token),
+        "bodhi_pat_prefix": client.token[:7] if client.token else "",
+        "bodhi_pat_length": len(client.token),
+        "portfolio_task_id": portfolio_task_id,
+        "portfolio_workflow_id": portfolio_workflow_id,
+        "auditor_task_id": auditor_task_id,
+        "auditor_workflow_id": auditor_workflow_id,
+        "get_portfolio_task": None,
+        "create_portfolio_run": None,
+    }
+
+    if not portfolio_task_id:
+        result["get_portfolio_task"] = {"ok": False, "error": "BODHI_PORTFOLIO_TASK_ID is not set"}
+        return result
+
+    try:
+        task = client.get_task(portfolio_task_id)
+        additional = task.get("additionalData") if isinstance(task, dict) else {}
+        result["get_portfolio_task"] = {
+            "ok": True,
+            "id": task.get("id") if isinstance(task, dict) else None,
+            "default_workflow": additional.get("defaultWorkflow") if isinstance(additional, dict) else None,
+        }
+    except Exception as exc:
+        result["get_portfolio_task"] = {"ok": False, "error": str(exc)[:500]}
+        return result
+
+    if create_run:
+        try:
+            trigger = client.trigger_task_run(
+                task_id=portfolio_task_id,
+                workflow_id=portfolio_workflow_id or None,
+                run_name="Evidence service Bodhi smoke",
+                inputs={"brand": "Smoke", "market": "Smoke", "domain": "https://example.com/"},
+            )
+            result["create_portfolio_run"] = {
+                "ok": True,
+                "run_id": client.extract_run_id(trigger),
+                "status": trigger.get("status") if isinstance(trigger, dict) else None,
+            }
+        except Exception as exc:
+            result["create_portfolio_run"] = {"ok": False, "error": str(exc)[:500]}
+
+    return result
+
 
 @app.get("/health")
 def health():
